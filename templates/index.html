@@ -364,6 +364,53 @@
         .mask-info {
             font-size: 0.8em;
             color: #7f8c8d;
+            margin-bottom: 8px;
+        }
+
+        .mask-actions {
+            display: flex;
+            gap: 5px;
+            justify-content: center;
+        }
+
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 0.7em;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: bold;
+        }
+
+        .btn-small.btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .btn-small.btn-primary:hover {
+            background: #2980b9;
+            transform: scale(1.05);
+        }
+
+        .btn-small.btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-small.btn-danger:hover {
+            background: #c0392b;
+            transform: scale(1.05);
+        }
+
+        .no-masks {
+            text-align: center;
+            color: #7f8c8d;
+            padding: 40px 20px;
+            font-style: italic;
+            background: rgba(127, 140, 141, 0.1);
+            border-radius: 10px;
+            border: 2px dashed #bdc3c7;
         }
 
         .replacements-grid {
@@ -856,6 +903,11 @@
             const grid = document.getElementById('masksGrid');
             grid.innerHTML = '';
 
+            if (masks.length === 0) {
+                grid.innerHTML = '<div class="no-masks">没有可用的掩码（已过滤空掩码）</div>';
+                return;
+            }
+
             masks.forEach((mask, index) => {
                 const item = document.createElement('div');
                 item.className = 'mask-item';
@@ -865,9 +917,16 @@
                         掩码 ${mask.id}<br>
                         面积: ${mask.area}
                     </div>
+                    <div class="mask-actions">
+                        <button class="btn-small btn-primary" onclick="selectMask(${mask.id}, this.parentElement.parentElement)">
+                            选择
+                        </button>
+                        <button class="btn-small btn-danger" onclick="deleteMask(${mask.id})" title="删除此掩码区域">
+                            🗑️ 删除
+                        </button>
+                    </div>
                 `;
                 
-                item.addEventListener('click', () => selectMask(mask.id, item));
                 grid.appendChild(item);
             });
         }
@@ -952,6 +1011,54 @@
                     loadHistory();
                 } else {
                     showStatus('error', data.error || '手动替换失败');
+                }
+            })
+            .catch(error => {
+                showStatus('error', '网络错误：' + error.message);
+            });
+        }
+
+        function deleteMask(maskId) {
+            if (!confirm(`确定要删除掩码 ${maskId} 吗？此操作将清除该区域的内容。`)) {
+                return;
+            }
+
+            showStatus('info', `正在删除掩码 ${maskId}...`);
+
+            fetch('/delete_mask', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ mask_id: maskId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    displayResult(data.result_image);
+                    showStatus('success', `成功删除掩码 ${maskId}！`);
+                    document.getElementById('downloadBtn').disabled = false;
+                    
+                    // 如果删除的是当前选中的掩码，清除选择
+                    if (selectedMaskId === maskId) {
+                        selectedMaskId = null;
+                        selectedReplacement = null;
+                        document.getElementById('selectedMaskInfo').textContent = '无';
+                        document.getElementById('manualReplaceSection').style.display = 'none';
+                        
+                        // 清除选择状态
+                        document.querySelectorAll('.mask-item').forEach(item => {
+                            item.classList.remove('selected');
+                        });
+                        document.querySelectorAll('.replacement-item').forEach(item => {
+                            item.classList.remove('selected');
+                        });
+                    }
+                    
+                    // 刷新操作历史
+                    loadHistory();
+                } else {
+                    showStatus('error', data.error || '删除掩码失败');
                 }
             })
             .catch(error => {

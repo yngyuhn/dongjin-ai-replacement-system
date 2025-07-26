@@ -307,18 +307,27 @@ def process_image():
 
 @app.route('/get_masks', methods=['GET'])
 def get_masks():
-    """获取所有掩码信息"""
+    """获取所有掩码信息（过滤空掩码）"""
     try:
         if current_session['masks'] is None:
             return jsonify({'error': '没有可用的掩码'}), 400
         
         masks_info = []
+        min_area_threshold = 100  # 最小面积阈值，过滤掉过小的掩码
+        
         for i, mask_dict in enumerate(current_session['masks']):
             mask = mask_dict["segmentation"]
             area = np.sum(mask)
             
-            # 创建掩码图像
+            # 过滤掉面积过小的掩码（空掩码或噪声掩码）
+            if area < min_area_threshold:
+                continue
+            
+            # 检查掩码是否有实际内容（不是全黑）
             mask_img = (mask.astype(np.uint8) * 255)
+            if np.max(mask_img) == 0:  # 全黑掩码
+                continue
+            
             mask_b64 = image_to_base64(mask_img)
             
             masks_info.append({
@@ -335,6 +344,48 @@ def get_masks():
     except Exception as e:
         print(f"获取掩码错误: {e}")
         return jsonify({'error': f'获取掩码失败: {str(e)}'}), 500
+
+@app.route('/delete_mask', methods=['POST'])
+def delete_mask():
+    """删除指定掩码区域"""
+    try:
+        data = request.get_json()
+        mask_id = int(data.get('mask_id'))
+        
+        if current_session['masks'] is None:
+            return jsonify({'error': '没有可用的掩码'}), 400
+        
+        if mask_id >= len(current_session['masks']):
+            return jsonify({'error': '掩码ID无效'}), 400
+        
+        if current_session['canvas'] is None:
+            return jsonify({'error': '没有可操作的画布'}), 400
+        
+        # 保存操作前状态
+        save_history_state("删除掩码前")
+        
+        # 获取掩码
+        mask = current_session['masks'][mask_id]["segmentation"]
+        canvas_gray = current_session['canvas'].copy()
+        
+        # 将掩码区域设置为白色（删除效果）
+        canvas_gray[mask] = 255
+        
+        current_session['canvas'] = canvas_gray
+        
+        # 保存操作后状态
+        save_history_state(f"删除掩码{mask_id}")
+        
+        result_b64 = image_to_base64(canvas_gray)
+        
+        return jsonify({
+            'success': True,
+            'result_image': result_b64
+        })
+        
+    except Exception as e:
+        print(f"删除掩码错误: {e}")
+        return jsonify({'error': f'删除掩码失败: {str(e)}'}), 500
 
 @app.route('/replace_manual', methods=['POST'])
 def replace_manual():
