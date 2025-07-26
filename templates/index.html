@@ -1202,6 +1202,8 @@
         let interactiveMasks = [];
         let currentHoveredMask = null;
         let currentSelectedMask = null;
+        let hoverTimeout = null;
+        let lastHoverPosition = { x: -1, y: -1 };
 
         function initInteractiveMaskSelection() {
             // 获取掩码信息
@@ -1237,34 +1239,32 @@
                 const scaleX = img.naturalWidth / img.offsetWidth;
                 const scaleY = img.naturalHeight / img.offsetHeight;
                 
-                // 鼠标移动事件 - 高亮掩码
+                // 鼠标移动事件 - 高亮掩码（优化版本）
                 img.addEventListener('mousemove', function(e) {
                     const rect = img.getBoundingClientRect();
                     const x = Math.floor((e.clientX - rect.left) * scaleX);
                     const y = Math.floor((e.clientY - rect.top) * scaleY);
                     
-                    // 检测鼠标位置的掩码
-                    fetch('/detect_mask_at_point', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ x: x, y: y })
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            highlightMask(data.mask_id);
-                            showTooltip(e.clientX, e.clientY, `掩码 ${data.mask_id} (面积: ${data.area})`);
-                        } else {
-                            clearHighlight();
-                            hideTooltip();
-                        }
-                    })
-                    .catch(error => {
+                    // 防抖：如果位置变化不大，不处理
+                    if (Math.abs(x - lastHoverPosition.x) < 5 && Math.abs(y - lastHoverPosition.y) < 5) {
+                        return;
+                    }
+                    lastHoverPosition = { x, y };
+                    
+                    // 清除之前的定时器
+                    if (hoverTimeout) {
+                        clearTimeout(hoverTimeout);
+                    }
+                    
+                    // 使用本地检测替代API调用
+                    const maskId = detectMaskAtPointLocal(x, y);
+                    if (maskId !== null) {
+                        highlightMask(maskId);
+                        showTooltip(e.clientX, e.clientY, `掩码 ${maskId}`);
+                    } else {
                         clearHighlight();
                         hideTooltip();
-                    });
+                    }
                 });
 
                 // 鼠标离开图像
@@ -1273,30 +1273,18 @@
                     hideTooltip();
                 });
 
-                // 点击选择掩码
+                // 点击选择掩码（优化版本）
                 img.addEventListener('click', function(e) {
                     const rect = img.getBoundingClientRect();
                     const x = Math.floor((e.clientX - rect.left) * scaleX);
                     const y = Math.floor((e.clientY - rect.top) * scaleY);
                     
-                    fetch('/detect_mask_at_point', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ x: x, y: y })
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            selectMaskInteractive(data.mask_id);
-                        } else {
-                            showStatus('info', '该位置没有可选择的掩码');
-                        }
-                    })
-                    .catch(error => {
-                        showStatus('error', '选择掩码失败');
-                    });
+                    const maskId = detectMaskAtPointLocal(x, y);
+                    if (maskId !== null) {
+                        selectMaskInteractive(maskId);
+                    } else {
+                        showStatus('info', '该位置没有可选择的掩码');
+                    }
                 });
             };
 
@@ -1304,6 +1292,45 @@
             if (img.complete) {
                 img.onload();
             }
+        }
+
+        function detectMaskAtPointLocal(x, y) {
+            // 本地检测鼠标位置的掩码，避免频繁API调用
+            let candidates = [];
+            
+            for (let mask of interactiveMasks) {
+                // 首先检查边界框
+                if (x >= mask.bbox.x && x <= mask.bbox.x + mask.bbox.width &&
+                    y >= mask.bbox.y && y <= mask.bbox.y + mask.bbox.height) {
+                    
+                    // 如果有轮廓信息，进行更精确的检测
+                    if (mask.contour && mask.contour.length > 0) {
+                        if (isPointInPolygon(x, y, mask.contour)) {
+                            candidates.push({ id: mask.id, area: mask.area });
+                        }
+                    } else {
+                        // 没有轮廓信息时，使用边界框
+                        candidates.push({ id: mask.id, area: mask.area });
+                    }
+                }
+            }
+            
+            if (candidates.length === 0) return null;
+            
+            // 返回面积最小的掩码（最精确的掩码）
+            candidates.sort((a, b) => a.area - b.area);
+            return candidates[0].id;
+        }
+
+        function isPointInPolygon(x, y, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                if (((polygon[i][1] > y) !== (polygon[j][1] > y)) &&
+                    (x < (polygon[j][0] - polygon[i][0]) * (y - polygon[i][1]) / (polygon[j][1] - polygon[i][1]) + polygon[i][0])) {
+                    inside = !inside;
+                }
+            }
+            return inside;
         }
 
         function highlightMask(maskId) {
