@@ -209,22 +209,51 @@ def upload_image():
         # 返回原始图像和掩码信息
         original_b64 = image_to_base64(image_gray)
         
-        # 创建掩码可视化
+        # 创建可点击的掩码覆盖图
         mask_overlay = np.zeros_like(image_gray)
         colors = np.random.randint(50, 255, (len(masks), 3))
         
+        # 存储掩码区域信息用于前端点击检测
+        mask_regions = []
+        min_area_threshold = 100  # 与get_masks保持一致的阈值
+        
         for i, mask_dict in enumerate(masks):
             mask = mask_dict["segmentation"]
+            area = np.sum(mask)
+            
+            # 过滤掉面积过小的掩码
+            if area < min_area_threshold:
+                continue
+                
+            # 检查掩码是否有实际内容
+            if np.max(mask.astype(np.uint8) * 255) == 0:
+                continue
+            
             color = colors[i % len(colors)]
             mask_overlay[mask] = np.mean(color)
+            
+            # 计算掩码的边界框
+            ys, xs = np.where(mask)
+            if len(ys) > 0 and len(xs) > 0:
+                bbox = {
+                    'id': i,
+                    'x_min': int(xs.min()),
+                    'y_min': int(ys.min()),
+                    'x_max': int(xs.max()),
+                    'y_max': int(ys.max()),
+                    'area': int(area)
+                }
+                mask_regions.append(bbox)
         
         mask_overlay_b64 = image_to_base64(mask_overlay)
+        current_session['mask_regions'] = mask_regions
         
         return jsonify({
             'success': True,
             'original_image': original_b64,
             'mask_overlay': mask_overlay_b64,
             'mask_count': len(masks),
+            'mask_regions': mask_regions,
             'image_size': f"{image_gray.shape[1]}x{image_gray.shape[0]}"
         })
         
