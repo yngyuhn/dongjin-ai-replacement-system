@@ -209,51 +209,22 @@ def upload_image():
         # 返回原始图像和掩码信息
         original_b64 = image_to_base64(image_gray)
         
-        # 创建可点击的掩码覆盖图
+        # 创建掩码可视化
         mask_overlay = np.zeros_like(image_gray)
         colors = np.random.randint(50, 255, (len(masks), 3))
         
-        # 存储掩码区域信息用于前端点击检测
-        mask_regions = []
-        min_area_threshold = 100  # 与get_masks保持一致的阈值
-        
         for i, mask_dict in enumerate(masks):
             mask = mask_dict["segmentation"]
-            area = np.sum(mask)
-            
-            # 过滤掉面积过小的掩码
-            if area < min_area_threshold:
-                continue
-                
-            # 检查掩码是否有实际内容
-            if np.max(mask.astype(np.uint8) * 255) == 0:
-                continue
-            
             color = colors[i % len(colors)]
             mask_overlay[mask] = np.mean(color)
-            
-            # 计算掩码的边界框
-            ys, xs = np.where(mask)
-            if len(ys) > 0 and len(xs) > 0:
-                bbox = {
-                    'id': i,
-                    'x_min': int(xs.min()),
-                    'y_min': int(ys.min()),
-                    'x_max': int(xs.max()),
-                    'y_max': int(ys.max()),
-                    'area': int(area)
-                }
-                mask_regions.append(bbox)
         
         mask_overlay_b64 = image_to_base64(mask_overlay)
-        current_session['mask_regions'] = mask_regions
         
         return jsonify({
             'success': True,
             'original_image': original_b64,
             'mask_overlay': mask_overlay_b64,
             'mask_count': len(masks),
-            'mask_regions': mask_regions,
             'image_size': f"{image_gray.shape[1]}x{image_gray.shape[0]}"
         })
         
@@ -357,12 +328,38 @@ def get_masks():
             if np.max(mask_img) == 0:  # 全黑掩码
                 continue
             
+            # 获取掩码边界框
+            ys, xs = np.where(mask)
+            if len(ys) == 0 or len(xs) == 0:
+                continue
+                
+            bbox = {
+                'x': int(xs.min()),
+                'y': int(ys.min()),
+                'width': int(xs.max() - xs.min() + 1),
+                'height': int(ys.max() - ys.min() + 1)
+            }
+            
+            # 获取掩码轮廓点（用于精确点击检测）
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contour_points = []
+            if contours:
+                # 选择最大的轮廓
+                largest_contour = max(contours, key=cv2.contourArea)
+                # 简化轮廓点
+                epsilon = 0.02 * cv2.arcLength(largest_contour, True)
+                approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+                contour_points = [[int(point[0][0]), int(point[0][1])] for point in approx]
+            
             mask_b64 = image_to_base64(mask_img)
             
             masks_info.append({
                 'id': i,
                 'area': int(area),
-                'image': mask_b64
+                'image': mask_b64,
+                'bbox': bbox,
+                'contour': contour_points,
+                'mask_data': mask.tolist()  # 完整掩码数据用于精确检测
             })
         
         return jsonify({
@@ -373,6 +370,52 @@ def get_masks():
     except Exception as e:
         print(f"获取掩码错误: {e}")
         return jsonify({'error': f'获取掩码失败: {str(e)}'}), 500
+
+@app.route('/detect_mask_at_point', methods=['POST'])
+def detect_mask_at_point():
+    """检测指定坐标点对应的掩码"""
+    try:
+        data = request.get_json()
+        x = int(data.get('x', 0))
+        y = int(data.get('y', 0))
+        
+        if current_session['masks'] is None:
+            return jsonify({'error': '没有可用的掩码'}), 400
+        
+        # 按面积从小到大排序，优先选择较小的掩码（避免大掩码覆盖小掩码）
+        mask_candidates = []
+        min_area_threshold = 100
+        
+        for i, mask_dict in enumerate(current_session['masks']):
+            mask = mask_dict["segmentation"]
+            area = np.sum(mask)
+            
+            # 过滤掉面积过小的掩码
+            if area < min_area_threshold:
+                continue
+            
+            # 检查点是否在掩码内
+            if y < mask.shape[0] and x < mask.shape[1] and mask[y, x]:
+                mask_candidates.append({
+                    'id': i,
+                    'area': int(area)
+                })
+        
+        if not mask_candidates:
+            return jsonify({'success': False, 'message': '该位置没有掩码'})
+        
+        # 选择面积最小的掩码（最精确的掩码）
+        selected_mask = min(mask_candidates, key=lambda m: m['area'])
+        
+        return jsonify({
+            'success': True,
+            'mask_id': selected_mask['id'],
+            'area': selected_mask['area']
+        })
+        
+    except Exception as e:
+        print(f"检测掩码位置错误: {e}")
+        return jsonify({'error': f'检测掩码位置失败: {str(e)}'}), 500
 
 @app.route('/delete_mask', methods=['POST'])
 def delete_mask():

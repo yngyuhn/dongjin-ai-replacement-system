@@ -547,6 +547,76 @@
             opacity: 1;
             visibility: visible;
         }
+
+        /* 交互式图像容器样式 */
+        .interactive-image-container {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+        }
+
+        .interactive-image-container img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        /* 掩码工具提示样式 */
+        .mask-tooltip {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            white-space: nowrap;
+        }
+
+        /* 选中掩码信息样式 */
+        .selected-mask-info {
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+
+        .selected-mask-info span {
+            font-weight: bold;
+            color: #495057;
+        }
+
+        #maskActions {
+            margin-top: 10px;
+        }
+
+        #maskActions button {
+            margin-right: 10px;
+        }
+
+        /* 按钮样式增强 */
+        .btn-danger {
+            background-color: #dc3545;
+            border-color: #dc3545;
+        }
+
+        .btn-danger:hover {
+            background-color: #c82333;
+            border-color: #bd2130;
+        }
+
+        .btn-primary {
+            background-color: #007bff;
+            border-color: #007bff;
+        }
+
+        .btn-primary:hover {
+            background-color: #0056b3;
+            border-color: #004085;
+        }
     </style>
 </head>
 <body>
@@ -641,13 +711,17 @@
             </div>
         </div>
 
-        <!-- 手动替换和操作历史面板 -->
+        <!-- 掩码选择和操作历史面板 -->
         <div class="main-content">
-            <!-- 手动替换区域 -->
-            <div class="panel">
+            <!-- 掩码管理面板 -->
+            <div class="panel masks-panel" id="masksPanel" style="display: none;">
+                <h2>🎭 掩码管理</h2>
+                <div id="masksGrid" class="masks-grid"></div>
+
+                <!-- 手动替换区域 -->
                 <div class="manual-replace-section" id="manualReplaceSection" style="display: none;">
                     <h3>🎨 手动替换</h3>
-                    <p>在上方图像中点击选择掩码区域，然后选择替换图案进行精确替换</p>
+                    <p>选择一个掩码和替换图案进行精确替换</p>
                     
                     <div style="margin: 15px 0;">
                         <strong>选中掩码：</strong> <span id="selectedMaskInfo">无</span>
@@ -682,8 +756,6 @@
         let selectedReplacement = null;
         let currentMasks = [];
         let currentReplacements = [];
-        let maskRegions = []; // 存储掩码区域信息
-        let currentImageSize = { width: 0, height: 0 }; // 存储当前图像尺寸
 
         // 初始化
         document.addEventListener('DOMContentLoaded', function() {
@@ -811,16 +883,6 @@
                 showLoading('uploadLoading', false);
                 
                 if (data.success) {
-                    // 保存掩码区域信息
-                    maskRegions = data.mask_regions || [];
-                    
-                    // 解析图像尺寸
-                    const sizeMatch = data.image_size.match(/(\d+)x(\d+)/);
-                    if (sizeMatch) {
-                        currentImageSize.width = parseInt(sizeMatch[1]);
-                        currentImageSize.height = parseInt(sizeMatch[2]);
-                    }
-                    
                     displayImages(data.original_image, data.mask_overlay);
                     showStatus('success', `上传成功！检测到 ${data.mask_count} 个区域，图像尺寸：${data.image_size}`);
                     document.getElementById('processBtn').disabled = false;
@@ -879,8 +941,18 @@
         }
 
         function loadMasks() {
-            // 掩码选择已改为直接在图像上点击，不再需要单独的掩码列表
-            console.log('掩码选择功能已集成到图像显示中');
+            fetch('/get_masks')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    currentMasks = data.masks;
+                    displayMasks(data.masks);
+                    document.getElementById('masksPanel').style.display = 'block';
+                }
+            })
+            .catch(error => {
+                console.error('加载掩码失败:', error);
+            });
         }
 
         function loadReplacements() {
@@ -898,8 +970,35 @@
         }
 
         function displayMasks(masks) {
-            // 掩码显示已改为直接在图像上点击选择
-            console.log(`已加载 ${masks.length} 个掩码，可在图像上直接点击选择`);
+            const grid = document.getElementById('masksGrid');
+            grid.innerHTML = '';
+
+            if (masks.length === 0) {
+                grid.innerHTML = '<div class="no-masks">没有可用的掩码（已过滤空掩码）</div>';
+                return;
+            }
+
+            masks.forEach((mask, index) => {
+                const item = document.createElement('div');
+                item.className = 'mask-item';
+                item.innerHTML = `
+                    <img src="${mask.image}" alt="掩码 ${mask.id}">
+                    <div class="mask-info">
+                        掩码 ${mask.id}<br>
+                        面积: ${mask.area}
+                    </div>
+                    <div class="mask-actions">
+                        <button class="btn-small btn-primary" onclick="selectMask(${mask.id}, this.parentElement.parentElement)">
+                            选择
+                        </button>
+                        <button class="btn-small btn-danger" onclick="deleteMask(${mask.id})" title="删除此掩码区域">
+                            🗑️ 删除
+                        </button>
+                    </div>
+                `;
+                
+                grid.appendChild(item);
+            });
         }
 
         function displayReplacements(replacements) {
@@ -920,8 +1019,19 @@
         }
 
         function selectMask(maskId, element) {
-            // 使用新的selectMaskById函数
-            selectMaskById(maskId);
+            // 清除之前的选择
+            document.querySelectorAll('.mask-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+
+            // 选择当前掩码
+            element.classList.add('selected');
+            selectedMaskId = maskId;
+            
+            document.getElementById('selectedMaskInfo').textContent = `掩码 ${maskId}`;
+            document.getElementById('manualReplaceSection').style.display = 'block';
+            
+            updateManualReplaceButton();
         }
 
         function selectReplacement(name, element) {
@@ -943,13 +1053,16 @@
         }
 
         function manualReplace() {
-            if (selectedMaskId === null || selectedReplacement === null) {
+            // 优先使用交互式选择的掩码
+            const maskId = currentSelectedMask !== null ? currentSelectedMask : selectedMaskId;
+            
+            if (maskId === null || selectedReplacement === null) {
                 showStatus('error', '请先选择掩码和替换图案！');
                 return;
             }
 
             const data = {
-                mask_id: selectedMaskId,
+                mask_id: maskId,
                 replacement_name: selectedReplacement
             };
 
@@ -964,8 +1077,21 @@
             .then(data => {
                 if (data.success) {
                     displayResult(data.result_image);
-                    showStatus('success', `成功替换掩码 ${selectedMaskId}！`);
+                    showStatus('success', `成功替换掩码 ${maskId}！`);
                     document.getElementById('downloadBtn').disabled = false;
+                    
+                    // 清除选中状态
+                    currentSelectedMask = null;
+                    selectedMaskId = null;
+                    selectedReplacement = null;
+                    document.getElementById('selectedMaskInfo').querySelector('span').textContent = '当前选中：无';
+                    document.getElementById('maskActions').style.display = 'none';
+                    document.getElementById('manualReplaceSection').style.display = 'none';
+                    
+                    // 清除替换图案选择
+                    document.querySelectorAll('.replacement-item').forEach(item => {
+                        item.classList.remove('selected');
+                    });
                     
                     // 刷新操作历史
                     loadHistory();
@@ -979,50 +1105,50 @@
         }
 
         function deleteMask(maskId) {
-            if (!confirm(`确定要删除掩码 ${maskId} 吗？此操作不可撤销。`)) {
+            if (!confirm(`确定要删除掩码 ${maskId} 吗？此操作将清除该区域的内容。`)) {
                 return;
             }
-            
+
+            showStatus('info', `正在删除掩码 ${maskId}...`);
+
             fetch('/delete_mask', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
+                    'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({
-                    mask_id: maskId
-                })
+                body: JSON.stringify({ mask_id: maskId })
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    showStatus('success', `掩码 ${maskId} 已删除`);
+                    displayResult(data.result_image);
+                    showStatus('success', `成功删除掩码 ${maskId}！`);
+                    document.getElementById('downloadBtn').disabled = false;
                     
-                    // 从maskRegions中移除已删除的掩码
-                    maskRegions = maskRegions.filter(region => region.id !== maskId);
+                    // 清除所有选中状态
+                    currentSelectedMask = null;
+                    selectedMaskId = null;
+                    selectedReplacement = null;
+                    document.getElementById('selectedMaskInfo').querySelector('span').textContent = '当前选中：无';
+                    document.getElementById('maskActions').style.display = 'none';
+                    document.getElementById('manualReplaceSection').style.display = 'none';
                     
-                    // 如果删除的是当前选中的掩码，清除选择
-                    if (selectedMaskId === maskId) {
-                        selectedMaskId = null;
-                        document.getElementById('selectedMaskDisplay').textContent = '无';
-                        document.getElementById('manualReplaceSection').style.display = 'none';
-                        
-                        // 清除canvas高亮
-                        const canvas = document.getElementById('maskOverlayCanvas');
-                        if (canvas) {
-                            const ctx = canvas.getContext('2d');
-                            ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        }
-                    }
+                    // 清除选择状态
+                    document.querySelectorAll('.mask-item').forEach(item => {
+                        item.classList.remove('selected');
+                    });
+                    document.querySelectorAll('.replacement-item').forEach(item => {
+                        item.classList.remove('selected');
+                    });
                     
-                    // 更新操作历史
+                    // 刷新操作历史
                     loadHistory();
                 } else {
-                    showStatus('error', data.message || '删除掩码失败');
+                    showStatus('error', data.error || '删除掩码失败');
                 }
             })
             .catch(error => {
-                console.error('删除掩码失败:', error);
-                showStatus('error', '删除掩码失败');
+                showStatus('error', '网络错误：' + error.message);
             });
         }
 
@@ -1036,140 +1162,291 @@
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
                     <div>
                         <h4>原始图像</h4>
-                        <img src="${originalImage}" alt="原始图像" style="max-width: 100%; height: auto;">
+                        <img src="${originalImage}" alt="原始图像">
                     </div>
                     <div>
-                        <h4>可点击掩码覆盖 <span style="font-size: 0.8em; color: #7f8c8d;">(点击选择掩码)</span></h4>
-                        <div class="mask-overlay-container" style="position: relative; display: inline-block;">
-                            <img id="maskOverlayImg" src="${maskOverlay}" alt="掩码覆盖" style="max-width: 100%; height: auto; cursor: crosshair;">
-                            <canvas id="maskOverlayCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0.3;"></canvas>
-                        </div>
-                        <div class="mask-selection-info" style="margin-top: 10px; padding: 10px; background: rgba(52, 152, 219, 0.1); border-radius: 5px;">
-                            <strong>选中掩码：</strong> <span id="selectedMaskDisplay">无</span>
-                            <div style="margin-top: 5px; font-size: 0.9em; color: #7f8c8d;">
-                                💡 提示：点击掩码区域进行选择，然后选择替换图案
-                            </div>
-                        </div>
+                        <h4>掩码覆盖</h4>
+                        <img src="${maskOverlay}" alt="掩码覆盖">
                     </div>
                 </div>
             `;
-            
-            // 添加点击事件监听器
-            const maskImg = document.getElementById('maskOverlayImg');
-            maskImg.addEventListener('click', handleMaskClick);
-            maskImg.addEventListener('load', setupMaskCanvas);
-        }
-
-        function setupMaskCanvas() {
-            const img = document.getElementById('maskOverlayImg');
-            const canvas = document.getElementById('maskOverlayCanvas');
-            const ctx = canvas.getContext('2d');
-            
-            // 设置canvas尺寸与图像一致
-            canvas.width = img.offsetWidth;
-            canvas.height = img.offsetHeight;
-            
-            // 清除canvas
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-
-        function handleMaskClick(event) {
-            const img = event.target;
-            const rect = img.getBoundingClientRect();
-            
-            // 计算点击位置相对于图像的坐标
-            const x = (event.clientX - rect.left) * (currentImageSize.width / img.offsetWidth);
-            const y = (event.clientY - rect.top) * (currentImageSize.height / img.offsetHeight);
-            
-            // 查找点击位置对应的掩码
-            let clickedMaskId = null;
-            let smallestArea = Infinity;
-            
-            for (const region of maskRegions) {
-                if (x >= region.x_min && x <= region.x_max && 
-                    y >= region.y_min && y <= region.y_max) {
-                    // 如果有多个掩码重叠，选择面积最小的（更精确的）
-                    if (region.area < smallestArea) {
-                        smallestArea = region.area;
-                        clickedMaskId = region.id;
-                    }
-                }
-            }
-            
-            if (clickedMaskId !== null) {
-                selectMaskById(clickedMaskId);
-                highlightMaskOnCanvas(clickedMaskId, x, y);
-            } else {
-                showStatus('info', '未检测到掩码区域，请点击有颜色的区域');
-            }
-        }
-
-        function selectMaskById(maskId) {
-            selectedMaskId = maskId;
-            
-            // 更新显示信息
-            const maskInfo = maskRegions.find(r => r.id === maskId);
-            if (maskInfo) {
-                document.getElementById('selectedMaskDisplay').textContent = 
-                    `掩码 ${maskId} (面积: ${maskInfo.area})`;
-            }
-            
-            // 显示手动替换区域
-            document.getElementById('manualReplaceSection').style.display = 'block';
-            document.getElementById('selectedMaskInfo').textContent = `掩码 ${maskId}`;
-            
-            updateManualReplaceButton();
-            
-            showStatus('success', `已选择掩码 ${maskId}，请选择替换图案`);
-        }
-
-        function highlightMaskOnCanvas(maskId, clickX, clickY) {
-            const canvas = document.getElementById('maskOverlayCanvas');
-            const ctx = canvas.getContext('2d');
-            const img = document.getElementById('maskOverlayImg');
-            
-            // 清除之前的高亮
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // 计算在canvas上的坐标
-            const canvasX = clickX * (img.offsetWidth / currentImageSize.width);
-            const canvasY = clickY * (img.offsetHeight / currentImageSize.height);
-            
-            // 绘制选择指示器
-            ctx.strokeStyle = '#e74c3c';
-            ctx.lineWidth = 3;
-            ctx.fillStyle = 'rgba(231, 76, 60, 0.3)';
-            
-            // 绘制十字标记
-            ctx.beginPath();
-            ctx.moveTo(canvasX - 10, canvasY);
-            ctx.lineTo(canvasX + 10, canvasY);
-            ctx.moveTo(canvasX, canvasY - 10);
-            ctx.lineTo(canvasX, canvasY + 10);
-            ctx.stroke();
-            
-            // 绘制圆圈
-            ctx.beginPath();
-            ctx.arc(canvasX, canvasY, 15, 0, 2 * Math.PI);
-            ctx.stroke();
-            
-            // 添加掩码ID标签
-            ctx.fillStyle = '#e74c3c';
-            ctx.font = 'bold 12px Arial';
-            ctx.fillText(`掩码 ${maskId}`, canvasX + 20, canvasY - 5);
         }
 
         function displayResult(resultImage) {
             const display = document.getElementById('imageDisplay');
             display.innerHTML = `
                 <div>
-                    <h4>处理结果</h4>
-                    <img src="${resultImage}" alt="处理结果">
+                    <h4>处理结果 - 点击图像选择掩码区域</h4>
+                    <div class="interactive-image-container">
+                        <img id="resultImage" src="${resultImage}" alt="处理结果" style="cursor: crosshair;">
+                        <canvas id="maskOverlay" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+                        <div id="maskTooltip" class="mask-tooltip"></div>
+                    </div>
                     <div class="image-info">
-                        ✨ 侗锦AI替换完成
+                        ✨ 侗锦AI替换完成 - 鼠标悬停查看掩码，点击选择操作
+                    </div>
+                    <div id="selectedMaskInfo" class="selected-mask-info">
+                        <span>当前选中：无</span>
+                        <div id="maskActions" style="display: none;">
+                            <button onclick="deleteSelectedMask()" class="btn-small btn-danger">删除掩码</button>
+                            <button onclick="showReplaceOptions()" class="btn-small btn-primary">替换掩码</button>
+                        </div>
                     </div>
                 </div>
             `;
+            
+            // 初始化交互式掩码选择
+            initInteractiveMaskSelection();
+        }
+
+        let interactiveMasks = [];
+        let currentHoveredMask = null;
+        let currentSelectedMask = null;
+
+        function initInteractiveMaskSelection() {
+            // 获取掩码信息
+            fetch('/get_masks')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.masks) {
+                    interactiveMasks = data.masks;
+                    setupImageInteraction();
+                }
+            })
+            .catch(error => {
+                console.error('获取掩码信息失败:', error);
+            });
+        }
+
+        function setupImageInteraction() {
+            const img = document.getElementById('resultImage');
+            const canvas = document.getElementById('maskOverlay');
+            const tooltip = document.getElementById('maskTooltip');
+            
+            if (!img || !canvas) return;
+
+            // 等待图像加载完成
+            img.onload = function() {
+                // 设置canvas尺寸与图像一致
+                canvas.width = img.offsetWidth;
+                canvas.height = img.offsetHeight;
+                canvas.style.width = img.offsetWidth + 'px';
+                canvas.style.height = img.offsetHeight + 'px';
+                
+                // 获取图像的实际尺寸和显示尺寸的比例
+                const scaleX = img.naturalWidth / img.offsetWidth;
+                const scaleY = img.naturalHeight / img.offsetHeight;
+                
+                // 鼠标移动事件 - 高亮掩码
+                img.addEventListener('mousemove', function(e) {
+                    const rect = img.getBoundingClientRect();
+                    const x = Math.floor((e.clientX - rect.left) * scaleX);
+                    const y = Math.floor((e.clientY - rect.top) * scaleY);
+                    
+                    // 检测鼠标位置的掩码
+                    fetch('/detect_mask_at_point', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ x: x, y: y })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            highlightMask(data.mask_id);
+                            showTooltip(e.clientX, e.clientY, `掩码 ${data.mask_id} (面积: ${data.area})`);
+                        } else {
+                            clearHighlight();
+                            hideTooltip();
+                        }
+                    })
+                    .catch(error => {
+                        clearHighlight();
+                        hideTooltip();
+                    });
+                });
+
+                // 鼠标离开图像
+                img.addEventListener('mouseleave', function() {
+                    clearHighlight();
+                    hideTooltip();
+                });
+
+                // 点击选择掩码
+                img.addEventListener('click', function(e) {
+                    const rect = img.getBoundingClientRect();
+                    const x = Math.floor((e.clientX - rect.left) * scaleX);
+                    const y = Math.floor((e.clientY - rect.top) * scaleY);
+                    
+                    fetch('/detect_mask_at_point', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ x: x, y: y })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            selectMaskInteractive(data.mask_id);
+                        } else {
+                            showStatus('info', '该位置没有可选择的掩码');
+                        }
+                    })
+                    .catch(error => {
+                        showStatus('error', '选择掩码失败');
+                    });
+                });
+            };
+
+            // 如果图像已经加载完成
+            if (img.complete) {
+                img.onload();
+            }
+        }
+
+        function highlightMask(maskId) {
+            if (currentHoveredMask === maskId) return;
+            
+            currentHoveredMask = maskId;
+            const canvas = document.getElementById('maskOverlay');
+            const ctx = canvas.getContext('2d');
+            
+            // 清除之前的高亮
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 绘制高亮掩码
+            const mask = interactiveMasks.find(m => m.id === maskId);
+            if (mask) {
+                drawMaskHighlight(ctx, mask, 'rgba(255, 255, 0, 0.3)', 'rgba(255, 255, 0, 0.8)');
+            }
+        }
+
+        function clearHighlight() {
+            if (currentHoveredMask === null) return;
+            
+            currentHoveredMask = null;
+            const canvas = document.getElementById('maskOverlay');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 重新绘制选中的掩码（如果有）
+            if (currentSelectedMask !== null) {
+                const mask = interactiveMasks.find(m => m.id === currentSelectedMask);
+                if (mask) {
+                    drawMaskHighlight(ctx, mask, 'rgba(0, 255, 0, 0.3)', 'rgba(0, 255, 0, 0.8)');
+                }
+            }
+        }
+
+        function selectMaskInteractive(maskId) {
+            currentSelectedMask = maskId;
+            selectedMaskId = maskId; // 更新全局选中状态
+            
+            // 更新选中信息显示
+            const selectedInfo = document.getElementById('selectedMaskInfo');
+            const maskActions = document.getElementById('maskActions');
+            
+            selectedInfo.querySelector('span').textContent = `当前选中：掩码 ${maskId}`;
+            maskActions.style.display = 'block';
+            
+            // 绘制选中状态
+            const canvas = document.getElementById('maskOverlay');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const mask = interactiveMasks.find(m => m.id === maskId);
+            if (mask) {
+                drawMaskHighlight(ctx, mask, 'rgba(0, 255, 0, 0.3)', 'rgba(0, 255, 0, 0.8)');
+            }
+            
+            showStatus('success', `已选中掩码 ${maskId}`);
+        }
+
+        function drawMaskHighlight(ctx, mask, fillColor, strokeColor) {
+            const img = document.getElementById('resultImage');
+            const scaleX = img.offsetWidth / img.naturalWidth;
+            const scaleY = img.offsetHeight / img.naturalHeight;
+            
+            // 绘制轮廓
+            if (mask.contour && mask.contour.length > 0) {
+                ctx.beginPath();
+                ctx.moveTo(mask.contour[0][0] * scaleX, mask.contour[0][1] * scaleY);
+                
+                for (let i = 1; i < mask.contour.length; i++) {
+                    ctx.lineTo(mask.contour[i][0] * scaleX, mask.contour[i][1] * scaleY);
+                }
+                
+                ctx.closePath();
+                ctx.fillStyle = fillColor;
+                ctx.fill();
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            } else {
+                // 如果没有轮廓，绘制边界框
+                ctx.fillStyle = fillColor;
+                ctx.fillRect(
+                    mask.bbox.x * scaleX,
+                    mask.bbox.y * scaleY,
+                    mask.bbox.width * scaleX,
+                    mask.bbox.height * scaleY
+                );
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(
+                    mask.bbox.x * scaleX,
+                    mask.bbox.y * scaleY,
+                    mask.bbox.width * scaleX,
+                    mask.bbox.height * scaleY
+                );
+            }
+        }
+
+        function showTooltip(x, y, text) {
+            const tooltip = document.getElementById('maskTooltip');
+            tooltip.textContent = text;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (x + 10) + 'px';
+            tooltip.style.top = (y - 30) + 'px';
+        }
+
+        function hideTooltip() {
+            const tooltip = document.getElementById('maskTooltip');
+            tooltip.style.display = 'none';
+        }
+
+        function deleteSelectedMask() {
+            if (currentSelectedMask === null) {
+                showStatus('error', '请先选择一个掩码');
+                return;
+            }
+            
+            deleteMask(currentSelectedMask);
+            
+            // 清除选中状态
+            currentSelectedMask = null;
+            selectedMaskId = null;
+            document.getElementById('selectedMaskInfo').querySelector('span').textContent = '当前选中：无';
+            document.getElementById('maskActions').style.display = 'none';
+        }
+
+        function showReplaceOptions() {
+            if (currentSelectedMask === null) {
+                showStatus('error', '请先选择一个掩码');
+                return;
+            }
+            
+            // 显示替换选项区域
+            document.getElementById('manualReplaceSection').style.display = 'block';
+            
+            // 滚动到替换选项区域
+            document.getElementById('manualReplaceSection').scrollIntoView({ 
+                behavior: 'smooth' 
+            });
+            
+            showStatus('info', `已选中掩码 ${currentSelectedMask}，请选择替换图案`);
         }
 
         function showLoading(elementId, show) {
