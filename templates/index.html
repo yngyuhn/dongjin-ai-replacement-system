@@ -883,14 +883,23 @@
                 showLoading('uploadLoading', false);
                 
                 if (data.success) {
-                    displayImages(data.original_image, data.mask_overlay);
-                    showStatus('success', `上传成功！检测到 ${data.mask_count} 个区域，图像尺寸：${data.image_size}`);
+                    // 只显示原始图像，不显示掩码覆盖
+                    const display = document.getElementById('imageDisplay');
+                    display.innerHTML = `
+                        <div>
+                            <h4>原始图像</h4>
+                            <img src="${data.original_image}" alt="原始图像">
+                        </div>
+                    `;
+                    
+                    showStatus('success', data.message || `上传成功！图像尺寸：${data.image_size}`);
                     document.getElementById('processBtn').disabled = false;
                     
-                    // 加载操作历史
-                    loadHistory();
+                    // 清空掩码面板
+                    document.getElementById('masksPanel').style.display = 'none';
                     
-                    loadMasks();
+                    // 重置历史记录
+                    loadHistory();
                 } else {
                     showStatus('error', data.error || '上传失败');
                 }
@@ -926,9 +935,9 @@
 
                 if (data.success) {
                     displayResult(data.result_image);
-                    showStatus('success', `处理完成！共处理 ${data.mask_count} 个区域`, 'processStatus');
+                    showStatus('success', `处理完成！生成了 ${data.mask_count} 个掩码区域`, 'processStatus');
                     document.getElementById('downloadBtn').disabled = false;
-                    loadMasks(); // 重新加载掩码
+                    loadMasks(); // 加载掩码
                 } else {
                     showStatus('error', data.error || '处理失败', 'processStatus');
                 }

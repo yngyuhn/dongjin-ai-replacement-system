@@ -184,48 +184,25 @@ def upload_image():
         current_session['canvas'] = np.ones_like(image_gray) * 255
         current_session['history'] = []  # 重置历史记录
         
+        # 初始化会话状态（不生成掩码）
+        current_session['masks'] = None
+        current_session['mask_features'] = None
+        current_session['root_nodes'] = None
+        current_session['history'] = []
+        
         # 保存初始状态
         save_history_state("初始上传")
         
-        # 生成掩码
-        print("生成掩码中...")
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        masks = mask_generator.generate(image_rgb)
-        
-        if not masks:
-            return jsonify({'error': '未能生成掩码'}), 400
-        
-        current_session['masks'] = masks
-        
-        # 计算掩码特征
-        print("计算掩码特征中...")
-        mask_features = f3.calculate_mask_features(image_gray, masks, dinov2_transform, dinov2_model, device)
-        current_session['mask_features'] = mask_features
-        
-        # 构建掩码树结构
-        root_nodes = f3.build_mask_tree(masks)
-        current_session['root_nodes'] = root_nodes
-        
-        # 返回原始图像和掩码信息
+        # 返回原始图像（不生成掩码）
         original_b64 = image_to_base64(image_gray)
-        
-        # 创建掩码可视化
-        mask_overlay = np.zeros_like(image_gray)
-        colors = np.random.randint(50, 255, (len(masks), 3))
-        
-        for i, mask_dict in enumerate(masks):
-            mask = mask_dict["segmentation"]
-            color = colors[i % len(colors)]
-            mask_overlay[mask] = np.mean(color)
-        
-        mask_overlay_b64 = image_to_base64(mask_overlay)
         
         return jsonify({
             'success': True,
             'original_image': original_b64,
-            'mask_overlay': mask_overlay_b64,
-            'mask_count': len(masks),
-            'image_size': f"{image_gray.shape[1]}x{image_gray.shape[0]}"
+            'mask_overlay': None,  # 暂时没有掩码
+            'mask_count': 0,
+            'image_size': f"{image_gray.shape[1]}x{image_gray.shape[0]}",
+            'message': '图像上传成功！请调整参数后点击"开始处理"生成掩码。'
         })
         
     except Exception as e:
@@ -244,10 +221,10 @@ def process_image():
         similarity_threshold = float(data.get('similarity', 0.8))
         density_threshold = float(data.get('density', 0.5))
         
-        if current_session['masks'] is None:
+        if current_session['image'] is None:
             return jsonify({'error': '请先上传图像'}), 400
         
-        # 重新创建掩码生成器（使用新参数）
+        # 重新创建掩码生成器（使用用户参数）
         global mask_generator
         mask_generator = SamAutomaticMaskGenerator(
             model=sam_model,
@@ -260,9 +237,14 @@ def process_image():
             crop_n_points_downscale_factor=2,
         )
         
-        # 重新生成掩码（如果参数改变）
+        # 生成掩码（使用用户设置的参数）
+        print(f"使用用户参数生成掩码: 置信值={confidence_threshold}, 稳定值={stability_threshold}")
         image_rgb = cv2.cvtColor(current_session['image'], cv2.COLOR_BGR2RGB)
         masks = mask_generator.generate(image_rgb)
+        
+        if not masks:
+            return jsonify({'error': '未能生成掩码，请尝试调整参数'}), 400
+        
         current_session['masks'] = masks
         
         # 重新计算特征和树结构
