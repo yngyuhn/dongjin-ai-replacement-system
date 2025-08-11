@@ -593,4 +593,15 @@ if __name__ == '__main__':
     print("正在初始化侗锦AI替换系统...")
     initialize_models()
     print("系统启动完成!")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    
+    # 获取端口号，默认为5000
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') != 'production'
+    
+    app.run(debug=debug, host='0.0.0.0', port=port)
+
+# 为生产环境初始化模型
+print("正在初始化侗锦AI替换系统...")
+initialize_models()
+print("系统启动完成!")
