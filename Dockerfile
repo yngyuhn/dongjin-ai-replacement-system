@@ -5,6 +5,7 @@ WORKDIR /app
 
 # 安装系统依赖
 RUN apt-get update && apt-get install -y \
+    git \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -15,10 +16,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
-COPY requirements.txt .
+COPY requirements-cloud.txt .
 
 # 安装Python依赖
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-cloud.txt
 
 # 复制应用代码
 COPY . .
