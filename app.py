@@ -128,10 +128,6 @@ def initialize_models():
     """初始化所有模型（带错误处理）"""
     global sam_model, mask_generator, dinov2_model, dinov2_transform, replacement_embeddings
     
-    # 如果模型已经初始化，直接返回
-    if sam_model is not None and dinov2_model is not None:
-        return
-    
     print("初始化模型中...")
     
     try:
@@ -184,11 +180,6 @@ def initialize_models():
             torch.cuda.empty_cache()
             
         raise Exception(f"模型初始化失败: {e}")
-
-def ensure_models_loaded():
-    """确保模型已加载（延迟初始化）"""
-    if sam_model is None or dinov2_model is None:
-        initialize_models()
 
 def load_replacement_images():
     """加载替换图像特征"""
@@ -265,11 +256,9 @@ def index():
 def health_check():
     """健康检查端点"""
     try:
-        # 确保尝试加载（非阻塞：initialize_models内部有快速返回）
-        ensure_models_loaded()
-        
-        # 检查模型是否已加载（不强制要求mask_generator，因为可按需重建）
+        # 检查模型是否已加载
         models_loaded = (sam_model is not None and 
+                        mask_generator is not None and 
                         dinov2_model is not None and 
                         dinov2_transform is not None)
         
@@ -354,9 +343,6 @@ def upload_image():
 def process_image():
     """处理图像替换"""
     try:
-        # 确保模型已经加载
-        ensure_models_loaded()
-        
         data = request.get_json()
         
         # 获取参数
@@ -435,7 +421,6 @@ def process_image():
 def get_masks():
     """获取所有掩码信息（过滤空掩码）"""
     try:
-        ensure_models_loaded()
         if current_session['masks'] is None:
             return jsonify({'error': '没有可用的掩码'}), 400
         
@@ -543,7 +528,6 @@ def delete_mask():
 def replace_manual():
     """手动替换指定掩码"""
     try:
-        ensure_models_loaded()
         data = request.get_json()
         mask_id = int(data.get('mask_id'))
         replacement_name = data.get('replacement_name')

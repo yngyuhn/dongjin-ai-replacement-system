@@ -1,9 +1,6 @@
 flask==2.3.3
-# 使用 PyPI 官方 CPU 轮子，去掉本地版本标签 +cpu
-# 与 torch 2.5.1 匹配的 torchvision 版本为 0.20.1
-# 若后续需升级，可成对升级（2.6.x 对应 0.21.x 等）
-torch==2.5.1
-torchvision==0.20.1
+torch==2.0.1+cpu
+torchvision==0.15.2+cpu
 opencv-python-headless==4.8.1.78
 numpy==1.24.3
 Pillow==10.0.1
