@@ -12,19 +12,95 @@ from scipy import ndimage
 
 # ========== DINOv2模型加载 ==========
 def load_dinov2_model(device="cuda", model_type="dinov2_vitb14"):
+    """加载DINOv2模型 - 使用timm避免torch.hub限流"""
     print(f"加载DINOv2模型: {model_type}...")
-    model = torch.hub.load('facebookresearch/dinov2', model_type)
-    model = model.to(device)
-    model.eval()
     
-    transform = T.Compose([
-        T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-    ])
+    # 设置timm缓存目录
+    cache_dir = os.environ.get('MODEL_CACHE_DIR', './model_cache')
+    os.environ['TIMM_HOME'] = cache_dir
     
-    return model, transform
+    try:
+        # 方法1: 优先使用timm (避免torch.hub限流)
+        import timm
+        
+        # timm中的DINOv2模型名称映射
+        timm_model_map = {
+            'dinov2_vitb14': 'vit_base_patch14_dinov2.lvd142m',
+            'dinov2_vits14': 'vit_small_patch14_dinov2.lvd142m', 
+            'dinov2_vitl14': 'vit_large_patch14_dinov2.lvd142m',
+            'dinov2_vitg14': 'vit_giant_patch14_dinov2.lvd142m'
+        }
+        
+        timm_model_name = timm_model_map.get(model_type, 'vit_base_patch14_dinov2.lvd142m')
+        print(f"使用timm加载: {timm_model_name}")
+        
+        # 设置下载超时和重试策略
+        import requests
+        old_timeout = getattr(requests, 'timeout', None)
+        requests.timeout = 60  # 60秒超时
+        
+        try:
+            model = timm.create_model(timm_model_name, pretrained=True)
+            model = model.to(device)
+            model.eval()
+            
+            # timm模型的transform
+            data_config = timm.data.resolve_model_data_config(model)
+            transform = timm.data.create_transform(**data_config, is_training=False)
+            
+            print("✅ 使用timm成功加载DINOv2模型")
+            return model, transform
+        finally:
+            # 恢复原始超时设置
+            if old_timeout:
+                requests.timeout = old_timeout
+        
+    except ImportError:
+        print("⚠️ timm未安装，回退到torch.hub方式")
+        try:
+            # 方法2: 回退到torch.hub (可能遇到限流)
+            model = torch.hub.load('facebookresearch/dinov2', model_type)
+            model = model.to(device)
+            model.eval()
+            
+            transform = T.Compose([
+                T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop(224),
+                T.ToTensor(),
+                T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ])
+            
+            print("✅ 使用torch.hub成功加载DINOv2模型")
+            return model, transform
+            
+        except Exception as e:
+            print(f"❌ torch.hub加载失败: {e}")
+            raise RuntimeError(f"无法加载DINOv2模型，请检查网络连接或稍后重试: {e}")
+    
+    except Exception as e:
+        print(f"❌ timm加载失败: {e}")
+        # 如果timm也失败，尝试torch.hub作为备选
+        try:
+            print("尝试torch.hub备选方案...")
+            model = torch.hub.load('facebookresearch/dinov2', model_type, force_reload=True)
+            model = model.to(device)
+            model.eval()
+            
+            transform = T.Compose([
+                T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+                T.CenterCrop(224),
+                T.ToTensor(),
+                T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ])
+            
+            print("✅ 备选方案成功加载DINOv2模型")
+            return model, transform
+            
+        except Exception as backup_e:
+            print(f"❌ 所有加载方案都失败了")
+            print(f"timm错误: {e}")
+            print(f"torch.hub错误: {backup_e}")
+            raise RuntimeError(f"无法加载DINOv2模型: timm失败({e}), torch.hub失败({backup_e})")
 
 # ========== 图像处理工具函数 ==========
 def imread_unicode(path, bg_color=(255, 255, 255)):
@@ -225,11 +301,35 @@ def calculate_mask_features(image_gray, masks, transform, dinov2_model, device):
             roi_tensor = transform(roi_pil).unsqueeze(0).to(device)
             
             with torch.no_grad():
-                features_dict = dinov2_model.forward_features(roi_tensor)
-                patch_tokens = features_dict['x_norm_patchtokens']
-                features = patch_tokens.mean(dim=1).cpu().numpy()
+                features = None
+                # 优先尝试DINOv2官方接口: forward_features -> dict['x_norm_patchtokens']
+                try:
+                    features_dict = dinov2_model.forward_features(roi_tensor)
+                    if isinstance(features_dict, dict) and 'x_norm_patchtokens' in features_dict:
+                        patch_tokens = features_dict['x_norm_patchtokens']
+                        features = patch_tokens.mean(dim=1).cpu().numpy()
+                except Exception:
+                    pass
                 
-            mask_features.append(features)
+                # 如果上面没有拿到，则尝试timm通用接口: get_global_pool / forward -> Tensor
+                if features is None:
+                    try:
+                        # timm大多数模型forward_features返回tensor，也可直接forward
+                        if hasattr(dinov2_model, 'forward_features'):
+                            out = dinov2_model.forward_features(roi_tensor)
+                            if isinstance(out, torch.Tensor):
+                                # 全局平均池化
+                                feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                                features = feat.detach().cpu().numpy()
+                        if features is None:
+                            out = dinov2_model(roi_tensor)
+                            if isinstance(out, torch.Tensor):
+                                feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                                features = feat.detach().cpu().numpy()
+                    except Exception:
+                        pass
+                
+            mask_features.append(features if features is not None else None)
         except Exception as e:
             print(f"计算掩码 {idx} 特征失败: {e}")
             mask_features.append(None)
@@ -279,11 +379,34 @@ def get_replacement_image_embeddings(image_paths, transform, dinov2_model, devic
             img_tensor = transform(img_rgb).unsqueeze(0).to(device)
             
             with torch.no_grad():
-                features_dict = dinov2_model.forward_features(img_tensor)
-                patch_tokens = features_dict['x_norm_patchtokens']
-                features = patch_tokens.mean(dim=1).cpu()
+                features = None
+                # 优先DINOv2官方输出
+                try:
+                    features_dict = dinov2_model.forward_features(img_tensor)
+                    if isinstance(features_dict, dict) and 'x_norm_patchtokens' in features_dict:
+                        patch_tokens = features_dict['x_norm_patchtokens']
+                        features = patch_tokens.mean(dim=1).cpu()
+                except Exception:
+                    pass
                 
-            image_embeddings.append((path, features))
+                # 兼容timm
+                if features is None:
+                    try:
+                        if hasattr(dinov2_model, 'forward_features'):
+                            out = dinov2_model.forward_features(img_tensor)
+                            if isinstance(out, torch.Tensor):
+                                feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                                features = feat.detach().cpu()
+                        if features is None:
+                            out = dinov2_model(img_tensor)
+                            if isinstance(out, torch.Tensor):
+                                feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                                features = feat.detach().cpu()
+                    except Exception:
+                        pass
+                
+            if features is not None:
+                image_embeddings.append((path, features))
         except Exception as e:
             print(f"处理替换图像失败: {path}, 错误: {e}")
     
@@ -354,36 +477,57 @@ def replace_one_mask(canvas_gray, image_gray, mask, replacement_embeddings,
         roi_tensor = transform(roi_pil).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            features_dict = dinov2_model.forward_features(roi_tensor)
-            patch_tokens = features_dict['x_norm_patchtokens']
-            roi_emb = patch_tokens.mean(dim=1)
-    except Exception as e:
-        if mask_index is not None:
-            print(f"❌ 处理ROI失败 (掩码 {mask_index}): {e}")
-        return False
-    
-    try:
+            features = None
+            try:
+                features_dict = dinov2_model.forward_features(roi_tensor)
+                if isinstance(features_dict, dict) and 'x_norm_patchtokens' in features_dict:
+                    patch_tokens = features_dict['x_norm_patchtokens']
+                    features = patch_tokens.mean(dim=1).cpu()
+            except Exception:
+                pass
+            
+            if features is None:
+                try:
+                    if hasattr(dinov2_model, 'forward_features'):
+                        out = dinov2_model.forward_features(roi_tensor)
+                        if isinstance(out, torch.Tensor):
+                            feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                            features = feat.detach().cpu()
+                    if features is None:
+                        out = dinov2_model(roi_tensor)
+                        if isinstance(out, torch.Tensor):
+                            feat = out.mean(dim=(2, 3)) if out.ndim == 4 else out
+                            features = feat.detach().cpu()
+                except Exception:
+                    pass
+        
+        if features is None:
+            if mask_index is not None:
+                print(f"❌ 特征提取失败 (掩码 {mask_index})")
+            return False
+
         similarities = []
         for path, emb in replacement_embeddings:
             emb = emb.squeeze()
-            roi_emb_flat = roi_emb.squeeze()
-            
+            roi_emb_flat = features.squeeze()
+
             emb = emb.unsqueeze(0) if emb.dim() == 1 else emb
             roi_emb_flat = roi_emb_flat.unsqueeze(0) if roi_emb_flat.dim() == 1 else roi_emb_flat
-            
+
             sim = torch.cosine_similarity(roi_emb_flat.cpu(), emb, dim=1).item()
             similarities.append((path, sim))
-        
+
         similarities.sort(key=lambda x: x[1], reverse=True)
-        
+
         if mask_index is not None:
             print(f"Top 3匹配图像:")
             for i, (path, sim) in enumerate(similarities[:3]):
                 print(f"{i+1}. {os.path.basename(path)} (相似度: {sim:.3f})")
-                
+
         best_path = similarities[0][0]
         if mask_index is not None:
             print(f"✅ 选择替换对象: {os.path.basename(best_path)}")
+    
     except Exception as e:
         if mask_index is not None:
             print(f"❌ 匹配图像失败 (掩码 {mask_index}): {e}")
@@ -395,7 +539,7 @@ def replace_one_mask(canvas_gray, image_gray, mask, replacement_embeddings,
             print(f"❌ 无法读取替换图像: {best_path}")
         return False
     
-    # 转换为灰度图
+    # 转换为灰度
     if len(rep_img.shape) == 3 and rep_img.shape[2] == 3:
         rep_gray = cv2.cvtColor(rep_img, cv2.COLOR_BGR2GRAY)
     else:
@@ -411,12 +555,12 @@ def replace_one_mask(canvas_gray, image_gray, mask, replacement_embeddings,
             print("❌ 调整图像大小失败")
         return False
     
-    # 亮度调整 - 匹配原图区域
+    # 亮度匹配
     orig_region = roi_gray[mask_region]
     rep_region = rep[mask_region]
     rep_adjusted = adjust_brightness(rep, orig_region)
     
-    # 应用掩码
+    # 精确掩码应用
     mask_region = mask[y0:y1, x0:x1].astype(np.uint8)
     smoothed_mask = smooth_mask(mask_region)
     
@@ -426,10 +570,10 @@ def replace_one_mask(canvas_gray, image_gray, mask, replacement_embeddings,
     
     canvas_roi = canvas_gray[y0:y1, x0:x1]
     
-    # 主掩码区域替换
+    # 主要区域替换
     canvas_roi[smoothed_mask] = rep_adjusted[smoothed_mask]
     
-    # 边界区域混合处理
+    # 边界融合
     if np.any(border > 0):
         alpha = 0.6
         canvas_roi[border > 0] = (

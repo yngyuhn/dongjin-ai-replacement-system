@@ -23,9 +23,31 @@ from model_manager import model_manager
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# 全局变量存储数据（模型由model_manager管理）
+# 全局变量
 replacement_embeddings = []
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 应用启动时进行懒加载初始化（适用于gunicorn等WSGI服务器）
+def init_app():
+    """应用初始化函数"""
+    # 设置模型缓存目录环境变量
+    model_cache_dir = os.environ.get('MODEL_CACHE_DIR', './model_cache')
+    os.environ['TORCH_HOME'] = model_cache_dir
+    os.environ['HF_HOME'] = model_cache_dir
+    
+    # 确保缓存目录存在
+    os.makedirs(model_cache_dir, exist_ok=True)
+    print(f"模型缓存目录: {model_cache_dir}")
+    
+    try:
+        initialize_models_lazy()
+        print("应用级初始化完成")
+    except Exception as e:
+        print(f"应用级初始化警告: {e}")
+
+# 检查是否在生产环境并自动初始化
+if os.environ.get('FLASK_ENV') == 'production':
+    init_app()
 
 # 存储当前处理的数据
 current_session = {
@@ -670,14 +692,22 @@ def get_history():
         return jsonify({'error': f'获取历史失败: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    print("启动侗锦AI替换系统（按需加载模式）...")
-    initialize_models_lazy()
-    print("系统启动完成! 将在第一次请求时加载大模型")
+    # 检查是否在生产环境（Render/云平台）
+    is_production = os.environ.get('FLASK_ENV') == 'production' or os.environ.get('PORT') is not None
     
-    # 获取端口号（云平台会设置PORT环境变量）
-    port = int(os.environ.get('PORT', 5000))
-    
-    # 生产环境关闭debug模式
-    debug_mode = os.environ.get('FLASK_ENV') != 'production'
-    
-    app.run(debug=debug_mode, host='0.0.0.0', port=port)
+    if not is_production:
+        # 仅在本地开发环境启动Flask开发服务器
+        print("启动侗锦AI替换系统（按需加载模式）...")
+        initialize_models_lazy()
+        print("系统启动完成! 将在第一次请求时加载大模型")
+        
+        # 获取端口号
+        port = int(os.environ.get('PORT', 5000))
+        
+        # 开发环境启用debug模式
+        app.run(debug=True, host='0.0.0.0', port=port)
+    else:
+        # 生产环境下，由gunicorn处理应用启动
+        # 这里只执行必要的初始化
+        print("生产环境检测到，由gunicorn管理应用启动")
+        initialize_models_lazy()
