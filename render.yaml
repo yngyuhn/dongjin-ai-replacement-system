@@ -3,9 +3,11 @@ services:
     name: dongjin-ai-replacement
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    startCommand: python app.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.18
-      - key: PORT
-        value: 10000
+        value: 3.9.16
+    disk:
+      name: sam-models
+      mountPath: /opt/render/project/src
+      sizeGB: 10

@@ -1,76 +1,92 @@
-# 侗锦AI替换系统 - 部署指南
+# 侗锦AI智能替换系统 - 远程部署指南
 
-## 🚀 在线部署方案
+## 🚀 最简洁部署方案
 
-### 方案1: Render (推荐 - 免费)
+### 方案一：Render（推荐）- 免费部署
 
-1. **准备工作**
-   - 确保代码已推送到Gitee仓库
-   - 注册 [Render](https://render.com) 账号
+1. **注册Render账号**
+   - 访问 [render.com](https://render.com)
+   - 使用GitHub账号登录
 
-2. **部署步骤**
-   - 登录Render控制台
-   - 点击 "New" → "Web Service"
-   - 连接您的Git仓库: `https://gitee.com/yngyuhn/dongjin-ai-replacement-system.git`
-   - 配置部署设置:
-     - **Name**: `dongjin-ai-replacement`
-     - **Environment**: `Python 3`
-     - **Build Command**: `pip install -r requirements.txt`
-     - **Start Command**: `gunicorn --bind 0.0.0.0:$PORT app:app`
-   - 点击 "Create Web Service"
+2. **连接GitHub仓库**
+   - 在Render控制台点击 "New +"
+   - 选择 "Web Service"
+   - 连接您的GitHub仓库：`yngyuhn/dongjin-ai-replacement-system`
 
-3. **环境变量设置**
+3. **配置部署设置**
    ```
-   FLASK_ENV=production
-   PYTHON_VERSION=3.9.18
+   Name: dongjin-ai-replacement
+   Environment: Python 3
+   Build Command: pip install -r requirements.txt
+   Start Command: python app.py
    ```
 
-### 方案2: Railway (免费额度)
+4. **等待部署完成**
+   - 首次部署需要10-15分钟（下载模型）
+   - 部署成功后获得公网访问地址
 
-1. **部署步骤**
-   - 访问 [Railway](https://railway.app)
-   - 使用GitHub/GitLab连接您的仓库
-   - Railway会自动检测Python项目并部署
+### 方案二：Railway - 一键部署
 
-### 方案3: Heroku (付费)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/new)
 
-1. **部署步骤**
-   - 安装Heroku CLI
-   - 登录: `heroku login`
-   - 创建应用: `heroku create your-app-name`
-   - 推送代码: `git push heroku master`
+1. 点击上方按钮
+2. 连接GitHub仓库
+3. 自动部署完成
 
-## 📋 部署文件说明
+### 方案三：Heroku - 企业级
 
-- `requirements.txt`: Python依赖包列表
-- `Procfile`: Heroku部署配置
-- `render.yaml`: Render部署配置
-- `app.py`: 主应用文件（已配置生产环境）
+1. 安装Heroku CLI
+2. 执行部署命令：
+   ```bash
+   heroku create dongjin-ai-replacement
+   git push heroku master
+   ```
 
-## ⚠️ 注意事项
+## 📋 部署注意事项
 
-1. **内存要求**: SAM模型较大，建议选择至少1GB内存的服务
-2. **启动时间**: 首次启动需要下载模型，可能需要几分钟
-3. **文件上传**: 确保平台支持文件上传功能
-4. **超时设置**: 图像处理可能需要较长时间，注意超时配置
+### 模型文件处理
+- SAM模型文件较大（2.5GB），首次部署需要时间
+- 建议使用云存储或CDN加速模型下载
 
-## 🔧 本地测试
+### 内存要求
+- 最低：4GB RAM
+- 推荐：8GB RAM
+- GPU支持：可选（CPU也可运行）
 
-部署前可以本地测试生产环境配置:
-
-```bash
-# 设置环境变量
-set FLASK_ENV=production
-set PORT=5000
-
-# 使用gunicorn运行
-gunicorn --bind 0.0.0.0:5000 app:app
+### 环境变量配置
+```
+PYTHON_VERSION=3.9.16
+FLASK_ENV=production
 ```
 
-## 📞 技术支持
+## 🔧 本地测试部署配置
 
-如遇到部署问题，请检查:
-1. 依赖包是否正确安装
-2. 环境变量是否正确设置
-3. 服务器内存是否充足
-4. 网络连接是否正常
+运行以下命令测试Docker部署：
+```bash
+# 构建镜像
+docker build -t dongjin-ai .
+
+# 运行容器
+docker run -p 5000:5000 dongjin-ai
+```
+
+## 📱 移动端适配
+
+项目已包含响应式设计，支持：
+- 手机浏览器访问
+- 平板设备使用
+- 桌面端完整功能
+
+## 🌐 域名绑定
+
+部署完成后可以：
+1. 使用平台提供的免费域名
+2. 绑定自定义域名
+3. 配置HTTPS证书（自动）
+
+## 💡 性能优化建议
+
+1. **启用缓存**：静态文件CDN加速
+2. **压缩图片**：自动图片压缩
+3. **负载均衡**：多实例部署
+4. **监控告警**：性能监控设置
