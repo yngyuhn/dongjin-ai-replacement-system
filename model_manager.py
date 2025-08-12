@@ -1,297 +1,383 @@
 """
-模型管理器 - 实现外部存储和按需加载
-解决Render内存限制问题
+模型管理器 - 支持AWS S3存储和按需加载
+解决Render部署内存限制问题
 """
-
 import os
-import gc
-import time
+import boto3
+import torch
 import hashlib
 import tempfile
-import requests
-import torch
-from typing import Optional, Dict, Any
-import logging
-from dotenv import load_dotenv
+import shutil
+from pathlib import Path
+from typing import Optional, Tuple, Dict
+import gc
+import time
 
-# 加载环境变量
-load_dotenv()
-
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# 直接导入f3模块
+import f3
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 
 class ModelManager:
-    """模型管理器，支持外部存储和按需加载"""
+    """模型管理器 - 支持S3存储和本地缓存"""
     
-    def __init__(self, cache_dir: str = None, max_memory_mb: int = None):
-        # 从环境变量获取配置，如果没有则使用默认值
-        self.cache_dir = cache_dir or os.getenv('LOCAL_CACHE_DIR', './model_cache')
-        self.max_memory_mb = max_memory_mb or int(os.getenv('MAX_MEMORY_USAGE_MB', '400'))
-        self.enable_unloading = os.getenv('ENABLE_MODEL_UNLOADING', 'true').lower() == 'true'
+    def __init__(self):
+        self.sam_model = None
+        self.mask_generator = None
+        self.dinov2_model = None
+        self.dinov2_transform = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # AWS S3 配置（可选）
-        self.aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
-        self.aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-        self.aws_region = os.getenv('AWS_REGION', 'us-east-1')
-        self.s3_bucket = os.getenv('S3_BUCKET_NAME')
+        # S3 配置 (可通过环境变量配置)
+        self.s3_bucket = os.getenv('S3_BUCKET', 'your-model-bucket')
+        self.s3_prefix = os.getenv('S3_PREFIX', 'models/')
         
-        self.models = {}
+        # 本地缓存目录
+        self.cache_dir = Path(os.getenv('MODEL_CACHE_DIR', './model_cache'))
+        self.cache_dir.mkdir(exist_ok=True)
+        
+        # 模型配置
         self.model_configs = {
             'sam_vit_h': {
-                'url': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth',
+                's3_key': f'{self.s3_prefix}sam_vit_h_4b8939.pth',
                 'filename': 'sam_vit_h_4b8939.pth',
-                'expected_size': 2564550879,  # 约2.5GB
-                'cache_dir': self.cache_dir
+                'size_mb': 2500,  # 约2.5GB
+                'checksum': 'a7bf3b02f3ebf1267aba913ff637d9a2'  # MD5校验
             }
         }
         
-        # 创建缓存目录
-        os.makedirs(self.cache_dir, exist_ok=True)
+        # 是否启用S3 (如果环境变量配置了AWS凭证)
+        self.use_s3 = self._check_s3_available()
         
-        logger.info(f"ModelManager初始化: 缓存目录={self.cache_dir}, 最大内存={self.max_memory_mb}MB, 自动卸载={self.enable_unloading}")
-        
-        # 如果配置了S3，记录日志
-        if self.s3_bucket:
-            logger.info(f"S3存储已配置: bucket={self.s3_bucket}, region={self.aws_region}")
+        print(f"模型管理器初始化 - S3启用: {self.use_s3}, 设备: {self.device}")
     
-    def get_model_path(self, model_name: str) -> str:
-        """获取模型文件路径"""
-        if model_name not in self.model_configs:
-            raise ValueError(f"未知模型: {model_name}")
-        
-        config = self.model_configs[model_name]
-        return os.path.join(config['cache_dir'], config['filename'])
-    
-    def is_model_cached(self, model_name: str) -> bool:
-        """检查模型是否已缓存"""
-        model_path = self.get_model_path(model_name)
-        if not os.path.exists(model_path):
-            return False
-        
-        # 验证文件大小
-        config = self.model_configs[model_name]
-        file_size = os.path.getsize(model_path)
-        expected_size = config['expected_size']
-        
-        # 允许5%的误差
-        return file_size >= expected_size * 0.95
-    
-    def download_from_s3(self, s3_path: str, local_path: str) -> bool:
-        """从S3下载文件"""
+    def _check_s3_available(self) -> bool:
+        """检查S3是否可用"""
         try:
-            import boto3
-            from botocore.exceptions import ClientError
+            # 检查AWS凭证是否配置
+            aws_key = os.getenv('AWS_ACCESS_KEY_ID')
+            aws_secret = os.getenv('AWS_SECRET_ACCESS_KEY')
             
-            # 创建S3客户端
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.aws_access_key,
-                aws_secret_access_key=self.aws_secret_key,
-                region_name=self.aws_region
-            )
+            if not aws_key or not aws_secret:
+                print("AWS凭证未配置，使用本地模式")
+                return False
+                
+            # 测试S3连接
+            s3 = boto3.client('s3')
+            s3.head_bucket(Bucket=self.s3_bucket)
+            print(f"S3连接成功 - Bucket: {self.s3_bucket}")
+            return True
             
-            logger.info(f"从S3下载: s3://{self.s3_bucket}/{s3_path} -> {local_path}")
+        except Exception as e:
+            print(f"S3不可用，使用本地模式: {e}")
+            return False
+    
+    def _calculate_file_checksum(self, filepath: str) -> str:
+        """计算文件MD5校验和"""
+        hash_md5 = hashlib.md5()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    
+    def _download_from_s3(self, s3_key: str, local_path: str) -> bool:
+        """从S3下载模型文件"""
+        try:
+            s3 = boto3.client('s3')
+            
+            print(f"正在从S3下载模型: {s3_key}")
+            start_time = time.time()
             
             # 下载文件
-            s3_client.download_file(self.s3_bucket, s3_path, local_path)
+            s3.download_file(
+                self.s3_bucket, 
+                s3_key, 
+                local_path
+            )
             
-            logger.info(f"S3下载完成: {local_path}")
+            download_time = time.time() - start_time
+            file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+            
+            print(f"S3下载完成: {file_size_mb:.1f}MB, 耗时: {download_time:.1f}秒")
             return True
             
-        except ImportError:
-            logger.error("boto3未安装，无法使用S3存储")
-            return False
-        except ClientError as e:
-            logger.error(f"S3下载失败: {e}")
-            return False
         except Exception as e:
-            logger.error(f"S3下载异常: {e}")
+            print(f"S3下载失败: {e}")
             return False
-
-    def download_model(self, model_name: str, force_download: bool = False) -> str:
-        """下载模型文件"""
+    
+    def _download_from_url(self, url: str, local_path: str, max_retries: int = 3) -> bool:
+        """从URL下载模型文件（备用方案）- 增强版本"""
+        import urllib.request
+        import requests
+        import socket
+        from urllib3.exceptions import ReadTimeoutError
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"正在从URL下载模型 (尝试 {attempt + 1}/{max_retries}): {url}")
+                start_time = time.time()
+                
+                # 方法1: 使用requests（推荐）
+                if attempt < 2:  # 前两次尝试用requests
+                    try:
+                        # 增加超时时间和连接配置
+                        session = requests.Session()
+                        session.mount('https://', requests.adapters.HTTPAdapter(max_retries=3))
+                        
+                        response = session.get(
+                            url, 
+                            stream=True, 
+                            timeout=(30, 300),  # (连接超时, 读取超时)
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                        )
+                        response.raise_for_status()
+                        
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        chunk_size = 64 * 1024  # 增大chunk size到64KB
+                        last_progress_time = time.time()
+                        
+                        with open(local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=chunk_size):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    
+                                    # 控制进度显示频率
+                                    current_time = time.time()
+                                    if current_time - last_progress_time > 2:  # 每2秒显示一次
+                                        if total_size > 0:
+                                            percent = (downloaded / total_size) * 100
+                                            speed_mb = downloaded / (1024 * 1024) / (current_time - start_time)
+                                            print(f"\r下载进度: {percent:.1f}% ({speed_mb:.1f}MB/s)", end='', flush=True)
+                                        last_progress_time = current_time
+                        
+                        print()  # 换行
+                        break  # 成功下载，退出重试循环
+                        
+                    except (requests.exceptions.Timeout, ReadTimeoutError, socket.timeout) as e:
+                        print(f"\nrequests下载超时 (尝试 {attempt + 1}): {e}")
+                        if os.path.exists(local_path):
+                            os.remove(local_path)
+                        if attempt < max_retries - 1:
+                            print(f"等待 {(attempt + 1) * 5} 秒后重试...")
+                            time.sleep((attempt + 1) * 5)
+                        continue
+                        
+                    except Exception as e:
+                        print(f"\nrequests下载失败 (尝试 {attempt + 1}): {e}")
+                        if os.path.exists(local_path):
+                            os.remove(local_path)
+                        continue
+                
+                # 方法2: 使用urllib作为最后备选
+                else:
+                    print("使用urllib进行最后尝试...")
+                    try:
+                        # 自定义进度回调
+                        def progress_hook(block_num, block_size, total_size):
+                            if total_size > 0:
+                                percent = min(100, (block_num * block_size / total_size) * 100)
+                                print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
+                        
+                        urllib.request.urlretrieve(url, local_path, progress_hook)
+                        print()  # 换行
+                        break
+                        
+                    except Exception as e:
+                        print(f"\nurllib下载失败: {e}")
+                        if os.path.exists(local_path):
+                            os.remove(local_path)
+                        continue
+                
+            except Exception as e:
+                print(f"\n下载尝试 {attempt + 1} 失败: {e}")
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+                
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10
+                    print(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+        
+        # 检查下载是否成功
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 1024 * 1024:  # 至少1MB
+            download_time = time.time() - start_time
+            file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+            print(f"✅ URL下载完成: {file_size_mb:.1f}MB, 耗时: {download_time:.1f}秒")
+            return True
+        else:
+            print(f"❌ {max_retries} 次尝试后下载失败")
+            return False
+    
+    def _get_model_path(self, model_name: str) -> Optional[str]:
+        """获取模型文件路径，必要时下载"""
         if model_name not in self.model_configs:
             raise ValueError(f"未知模型: {model_name}")
         
         config = self.model_configs[model_name]
-        model_path = self.get_model_path(model_name)
+        local_path = self.cache_dir / config['filename']
         
-        # 检查是否需要下载
-        if not force_download and self.is_model_cached(model_name):
-            logger.info(f"模型 {model_name} 已缓存，跳过下载")
-            return model_path
-        
-        # 删除不完整的文件
-        if os.path.exists(model_path):
-            os.remove(model_path)
-        
-        # 首先尝试从S3下载（如果配置了）
-        if self.s3_bucket:
-            s3_path = os.getenv(f'{model_name.upper()}_MODEL_S3_PATH')
-            if s3_path and self.download_from_s3(s3_path, model_path):
-                # 验证下载的文件
-                file_size = os.path.getsize(model_path)
-                if file_size >= config['expected_size'] * 0.95:
-                    logger.info(f"模型 {model_name} 从S3下载完成! 文件大小: {file_size // (1024*1024)}MB")
-                    return model_path
+        # 检查本地缓存
+        if local_path.exists():
+            # 验证文件完整性
+            if config.get('checksum'):
+                actual_checksum = self._calculate_file_checksum(str(local_path))
+                if actual_checksum == config['checksum']:
+                    print(f"使用缓存模型: {local_path}")
+                    return str(local_path)
                 else:
-                    logger.warning(f"S3下载的文件大小异常，尝试从URL下载")
-                    os.remove(model_path)
+                    print(f"缓存文件校验失败，重新下载: {local_path}")
+                    local_path.unlink()
             else:
-                logger.warning(f"S3下载失败，尝试从URL下载: {model_name}")
+                # 简单大小检查
+                file_size_mb = local_path.stat().st_size / (1024 * 1024)
+                if file_size_mb >= config['size_mb'] * 0.95:  # 允许5%误差
+                    print(f"使用缓存模型: {local_path}")
+                    return str(local_path)
+                else:
+                    print(f"缓存文件大小异常，重新下载: {local_path}")
+                    local_path.unlink()
         
-        logger.info(f"开始下载模型 {model_name}...")
-        logger.info(f"URL: {config['url']}")
-        logger.info(f"目标路径: {model_path}")
+        # 下载模型
+        download_success = False
         
-        # 从URL下载文件
-        try:
-            response = requests.get(config['url'], stream=True, timeout=60)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size > 0:
-                            percent = (downloaded / total_size) * 100
-                            if downloaded % (1024 * 1024 * 10) == 0:  # 每10MB打印一次
-                                logger.info(f"下载进度: {percent:.1f}% ({downloaded // (1024*1024)}MB/{total_size // (1024*1024)}MB)")
-            
-            # 验证下载的文件
-            file_size = os.path.getsize(model_path)
-            if file_size < config['expected_size'] * 0.95:
-                raise Exception(f"下载的文件大小异常: {file_size} bytes, 期望: {config['expected_size']} bytes")
-            
-            logger.info(f"模型 {model_name} 下载完成! 文件大小: {file_size // (1024*1024)}MB")
-            return model_path
-            
-        except Exception as e:
-            if os.path.exists(model_path):
-                os.remove(model_path)
-            raise Exception(f"模型下载失败: {e}")
+        if self.use_s3:
+            # 优先从S3下载
+            download_success = self._download_from_s3(config['s3_key'], str(local_path))
+        
+        if not download_success:
+            # 备用方案：从官方URL下载
+            if model_name == 'sam_vit_h':
+                sam_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+                download_success = self._download_from_url(sam_url, str(local_path))
+        
+        if download_success and local_path.exists():
+            return str(local_path)
+        else:
+            raise RuntimeError(f"无法下载模型: {model_name}")
     
-    def load_model_lazy(self, model_name: str, loader_func, *args, **kwargs):
-        """懒加载模型 - 只在需要时加载到内存"""
-        if model_name in self.models:
-            logger.info(f"模型 {model_name} 已在内存中")
-            return self.models[model_name]
+    def load_sam_model(self, force_reload: bool = False) -> Tuple[object, object]:
+        """按需加载SAM模型"""
+        if self.sam_model is not None and self.mask_generator is not None and not force_reload:
+            print("SAM模型已加载，直接返回")
+            return self.sam_model, self.mask_generator
         
-        # 确保模型文件存在
-        model_path = self.download_model(model_name)
+        # 清理之前的模型
+        if force_reload:
+            self.unload_sam_model()
         
-        logger.info(f"正在加载模型 {model_name} 到内存...")
-        
-        # 清理内存
-        self.cleanup_memory()
+        print("正在加载SAM模型...")
         
         try:
-            # 加载模型
-            model = loader_func(model_path, *args, **kwargs)
-            self.models[model_name] = model
+            # 获取模型文件
+            model_path = self._get_model_path('sam_vit_h')
             
-            logger.info(f"模型 {model_name} 加载完成")
-            return model
+            # 加载模型
+            model_type = "vit_h"
+            print(f"从文件加载SAM模型: {model_path}")
+            
+            self.sam_model = sam_model_registry[model_type](checkpoint=model_path).to(self.device)
+            
+            # 创建掩码生成器
+            self.mask_generator = SamAutomaticMaskGenerator(
+                model=self.sam_model,
+                points_per_side=64,
+                points_per_batch=32,
+                pred_iou_thresh=0.8,
+                stability_score_thresh=0.8,
+                min_mask_region_area=64,
+                crop_n_layers=1,
+                crop_n_points_downscale_factor=2,
+            )
+            
+            print("✅ SAM模型加载完成")
+            return self.sam_model, self.mask_generator
             
         except Exception as e:
-            logger.error(f"模型加载失败: {e}")
+            print(f"❌ SAM模型加载失败: {e}")
             raise
     
-    def unload_model(self, model_name: str) -> bool:
-        """卸载模型以释放内存"""
-        if model_name in self.models:
-            del self.models[model_name]
-            
-            # 强制垃圾回收
-            import gc
-            gc.collect()
-            
-            # 清理GPU缓存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            logger.info(f"模型已卸载: {model_name}")
-            return True
-        return False
-    
-    def auto_manage_memory(self):
-        """自动内存管理"""
-        if not self.enable_unloading:
-            return
+    def load_dinov2_model(self, force_reload: bool = False) -> Tuple[object, object]:
+        """按需加载DINOv2模型"""
+        if self.dinov2_model is not None and self.dinov2_transform is not None and not force_reload:
+            print("DINOv2模型已加载，直接返回")
+            return self.dinov2_model, self.dinov2_transform
         
-        current_memory = self.get_memory_usage()
-        if current_memory > self.max_memory_mb:
-            logger.warning(f"内存使用过高: {current_memory}MB > {self.max_memory_mb}MB，开始自动卸载模型")
+        # 清理之前的模型
+        if force_reload:
+            self.unload_dinov2_model()
+        
+        print("正在加载DINOv2模型...")
+        
+        try:
+            self.dinov2_model, self.dinov2_transform = f3.load_dinov2_model(self.device, "dinov2_vitb14")
+            print("✅ DINOv2模型加载完成")
+            return self.dinov2_model, self.dinov2_transform
             
-            # 按使用时间排序，优先卸载最久未使用的模型
-            # 这里简化处理，可以根据需要实现更复杂的策略
-            for model_name in list(self.models.keys()):
-                if self.unload_model(model_name):
-                    current_memory = self.get_memory_usage()
-                    logger.info(f"卸载后内存使用: {current_memory}MB")
-                    if current_memory <= self.max_memory_mb * 0.8:  # 留20%缓冲
-                        break
+        except Exception as e:
+            print(f"❌ DINOv2模型加载失败: {e}")
+            raise
+    
+    def unload_sam_model(self):
+        """卸载SAM模型以释放内存"""
+        if self.sam_model is not None:
+            print("卸载SAM模型...")
+            del self.sam_model
+            del self.mask_generator
+            self.sam_model = None
+            self.mask_generator = None
+        
+        self._cleanup_memory()
+    
+    def unload_dinov2_model(self):
+        """卸载DINOv2模型以释放内存"""
+        if self.dinov2_model is not None:
+            print("卸载DINOv2模型...")
+            del self.dinov2_model
+            del self.dinov2_transform
+            self.dinov2_model = None
+            self.dinov2_transform = None
+        
+        self._cleanup_memory()
     
     def unload_all_models(self):
         """卸载所有模型"""
-        model_names = list(self.models.keys())
-        for model_name in model_names:
-            self.unload_model(model_name)
-        logger.info("所有模型已卸载")
+        print("卸载所有模型...")
+        self.unload_sam_model()
+        self.unload_dinov2_model()
     
-    def cleanup_memory(self):
+    def _cleanup_memory(self):
         """清理内存"""
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
-    def get_memory_usage(self) -> Dict[str, Any]:
+    def get_memory_usage(self) -> Dict[str, str]:
         """获取内存使用情况"""
         import psutil
-        process = psutil.Process()
-        memory_info = process.memory_info()
+        
+        # 系统内存
+        memory = psutil.virtual_memory()
         
         result = {
-            'rss_mb': memory_info.rss / 1024 / 1024,  # 物理内存
-            'vms_mb': memory_info.vms / 1024 / 1024,  # 虚拟内存
-            'loaded_models': list(self.models.keys())
+            'system_total': f"{memory.total / (1024**3):.1f} GB",
+            'system_used': f"{memory.used / (1024**3):.1f} GB",
+            'system_percent': f"{memory.percent:.1f}%"
         }
         
+        # GPU内存
         if torch.cuda.is_available():
-            result['gpu_memory_mb'] = torch.cuda.memory_allocated() / 1024 / 1024
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory
+            gpu_allocated = torch.cuda.memory_allocated(0)
+            gpu_cached = torch.cuda.memory_reserved(0)
+            
+            result.update({
+                'gpu_total': f"{gpu_memory / (1024**3):.1f} GB",
+                'gpu_allocated': f"{gpu_allocated / (1024**3):.1f} GB", 
+                'gpu_cached': f"{gpu_cached / (1024**3):.1f} GB"
+            })
         
         return result
-    
-    def clear_cache(self):
-        """清理缓存文件"""
-        for model_name, config in self.model_configs.items():
-            model_path = self.get_model_path(model_name)
-            if os.path.exists(model_path):
-                os.remove(model_path)
-                logger.info(f"已删除缓存文件: {model_path}")
 
 # 全局模型管理器实例
 model_manager = ModelManager()
-
-def download_sam_model_optimized():
-    """优化的SAM模型下载函数"""
-    return model_manager.download_model('sam_vit_h')
-
-def load_sam_model_lazy(device="cpu"):
-    """懒加载SAM模型"""
-    from segment_anything import sam_model_registry
-    
-    def loader_func(model_path):
-        return sam_model_registry["vit_h"](checkpoint=model_path).to(device)
-    
-    return model_manager.load_model_lazy('sam_vit_h', loader_func)
-
-def get_memory_status():
-    """获取内存状态"""
-    return model_manager.get_memory_usage()

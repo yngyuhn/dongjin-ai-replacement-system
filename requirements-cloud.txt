@@ -8,8 +8,6 @@ scikit-learn
 scipy
 tqdm
 requests
-gunicorn
-psutil
 boto3
-python-dotenv
+gunicorn
 git+https://github.com/facebookresearch/segment-anything.git

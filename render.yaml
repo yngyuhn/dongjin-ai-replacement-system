@@ -2,7 +2,7 @@ services:
   - type: web
     name: dongjin-ai-replacement
     env: python
-    buildCommand: pip install --upgrade pip && pip install flask gunicorn torch torchvision opencv-python-headless numpy Pillow scikit-learn scipy tqdm requests && pip install git+https://github.com/facebookresearch/segment-anything.git
+    buildCommand: pip install --upgrade pip && pip install flask gunicorn torch torchvision opencv-python-headless numpy Pillow scikit-learn scipy tqdm requests boto3 && pip install git+https://github.com/facebookresearch/segment-anything.git
     startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 --max-requests 1000 --max-requests-jitter 100 app:app
     envVars:
       - key: PYTHON_VERSION
@@ -11,6 +11,8 @@ services:
         value: production
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MODEL_CACHE_DIR
+        value: /opt/render/project/src/models
     disk:
       name: sam-models
       mountPath: /opt/render/project/src/models
