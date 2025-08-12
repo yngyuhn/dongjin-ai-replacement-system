@@ -18,18 +18,9 @@ RUN apt-get update && apt-get install -y \
 # 复制云部署专用依赖文件
 COPY requirements-cloud.txt .
 
-# 先安装基础依赖
-RUN pip install --no-cache-dir flask==2.3.3 \
-    torch==2.6.0+cpu \
-    torchvision==0.21.0+cpu \
-    opencv-python-headless==4.8.1.78 \
-    numpy==1.24.3 \
-    Pillow==10.0.1 \
-    scikit-learn==1.3.0 \
-    scipy==1.11.4 \
-    tqdm==4.66.1 \
-    requests==2.31.0 \
-    gunicorn==21.2.0
+# 升级pip并安装基础依赖
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir flask gunicorn torch torchvision opencv-python-headless numpy Pillow scikit-learn scipy tqdm requests
 
 # 单独安装segment-anything
 RUN pip install --no-cache-dir git+https://github.com/facebookresearch/segment-anything.git
