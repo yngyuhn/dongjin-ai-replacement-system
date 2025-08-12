@@ -1,0 +1,46 @@
+# Render部署时忽略的文件和目录
+
+# 本地开发文件
+start.bat
+requirements.txt
+
+# Git相关
+.git/
+.gitignore
+
+# 文档文件（减少部署包大小）
+README.md
+PROJECT_SUMMARY.md
+
+# 其他云平台配置
+railway.json
+deploy.sh
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志文件
+*.log
+logs/
+
+# 测试文件
+test_*.py
+*_test.py
+tests/

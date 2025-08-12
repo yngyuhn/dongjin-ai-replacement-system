@@ -44,4 +44,4 @@ RUN mkdir -p /app && chmod 755 /app
 EXPOSE 5000
 
 # 启动应用（模型将在首次运行时自动下载）
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "300", "--max-requests", "1000", "--max-requests-jitter", "100", "app:app"]

@@ -14,6 +14,7 @@ from flask import Flask, render_template, request, jsonify, send_file
 import json
 import tempfile
 import shutil
+import gc
 
 # 直接导入f3模块
 import f3
@@ -42,26 +43,54 @@ current_session = {
 }
 
 def download_sam_model():
-    """下载SAM模型文件"""
+    """下载SAM模型文件（带重试机制）"""
     import urllib.request
+    import time
     
     sam_checkpoint = "sam_vit_h_4b8939.pth"
     sam_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
     
-    if not os.path.exists(sam_checkpoint):
-        print(f"正在下载SAM模型文件 ({sam_url})...")
-        print("模型文件较大(2.5GB)，首次下载需要一些时间，请耐心等待...")
-        
+    # 检查模型文件是否已存在且完整
+    if os.path.exists(sam_checkpoint):
+        file_size = os.path.getsize(sam_checkpoint)
+        expected_size = 2564550879  # SAM模型的预期大小（约2.5GB）
+        if file_size >= expected_size * 0.95:  # 允许5%的误差
+            print("SAM模型文件已存在，跳过下载")
+            return sam_checkpoint
+        else:
+            print(f"模型文件不完整（{file_size} bytes），重新下载...")
+            os.remove(sam_checkpoint)
+    
+    print(f"正在下载SAM模型文件 ({sam_url})...")
+    print("模型文件较大(2.5GB)，首次下载需要一些时间，请耐心等待...")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
+            if attempt > 0:
+                print(f"第 {attempt + 1} 次尝试下载...")
+                time.sleep(5)  # 重试前等待5秒
+            
+            # 首先尝试urllib方法
             urllib.request.urlretrieve(sam_url, sam_checkpoint)
             print("SAM模型下载完成!")
+            
+            # 验证下载的文件大小
+            file_size = os.path.getsize(sam_checkpoint)
+            if file_size < 1000000:  # 如果文件小于1MB，可能下载失败
+                raise Exception(f"下载的文件大小异常: {file_size} bytes")
+            
+            return sam_checkpoint
+            
         except Exception as e:
-            print(f"模型下载失败: {e}")
-            # 尝试使用备用下载方法
+            print(f"urllib下载失败: {e}")
+            
+            # 尝试使用requests备用方法
             try:
                 import requests
                 print("尝试使用备用下载方法...")
-                response = requests.get(sam_url, stream=True)
+                
+                response = requests.get(sam_url, stream=True, timeout=60)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
@@ -77,43 +106,80 @@ def download_sam_model():
                                 print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
                 
                 print("\nSAM模型下载完成!")
+                
+                # 验证下载的文件大小
+                file_size = os.path.getsize(sam_checkpoint)
+                if file_size < 1000000:
+                    raise Exception(f"下载的文件大小异常: {file_size} bytes")
+                
+                return sam_checkpoint
+                
             except Exception as e2:
-                raise Exception(f"模型下载失败: {e2}")
+                print(f"备用下载方法也失败: {e2}")
+                if os.path.exists(sam_checkpoint):
+                    os.remove(sam_checkpoint)  # 删除不完整的文件
+                
+                if attempt == max_retries - 1:
+                    raise Exception(f"模型下载失败，已尝试 {max_retries} 次: {e2}")
     
-    return sam_checkpoint
+    raise Exception("模型下载失败，请检查网络连接")
 
 def initialize_models():
-    """初始化所有模型"""
+    """初始化所有模型（带错误处理）"""
     global sam_model, mask_generator, dinov2_model, dinov2_transform, replacement_embeddings
     
     print("初始化模型中...")
     
-    # 下载并加载SAM模型
-    sam_checkpoint = download_sam_model()
-    model_type = "vit_h"
-    
-    print("正在加载SAM模型...")
-    sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint).to(device)
-    
-    # 创建掩码生成器
-    mask_generator = SamAutomaticMaskGenerator(
-        model=sam_model,
-        points_per_side=64,
-        points_per_batch=32,
-        pred_iou_thresh=0.8,
-        stability_score_thresh=0.8,
-        min_mask_region_area=64,
-        crop_n_layers=1,
-        crop_n_points_downscale_factor=2,
-    )
-    
-    # 加载DINOv2模型
-    dinov2_model, dinov2_transform = f3.load_dinov2_model(device, "dinov2_vitb14")
-    
-    # 预加载替换图像特征
-    load_replacement_images()
-    
-    print("模型初始化完成!")
+    try:
+        # 下载并加载SAM模型
+        print("步骤 1/4: 下载SAM模型...")
+        sam_checkpoint = download_sam_model()
+        model_type = "vit_h"
+        
+        print("步骤 2/4: 加载SAM模型...")
+        sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint).to(device)
+        
+        # 创建掩码生成器
+        print("步骤 3/4: 创建掩码生成器...")
+        mask_generator = SamAutomaticMaskGenerator(
+            model=sam_model,
+            points_per_side=64,
+            points_per_batch=32,
+            pred_iou_thresh=0.8,
+            stability_score_thresh=0.8,
+            min_mask_region_area=64,
+            crop_n_layers=1,
+            crop_n_points_downscale_factor=2,
+        )
+        
+        # 加载DINOv2模型
+        print("步骤 4/4: 加载DINOv2模型...")
+        dinov2_model, dinov2_transform = f3.load_dinov2_model(device, "dinov2_vitb14")
+        
+        # 预加载替换图像特征
+        print("加载替换图像特征...")
+        load_replacement_images()
+        
+        print("✅ 模型初始化完成!")
+        
+        # 清理内存
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+    except Exception as e:
+        print(f"❌ 模型初始化失败: {e}")
+        print("请检查:")
+        print("1. 网络连接是否正常")
+        print("2. 磁盘空间是否足够（需要至少3GB）")
+        print("3. 系统内存是否足够（建议至少4GB）")
+        
+        # 清理内存
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        raise Exception(f"模型初始化失败: {e}")
 
 def load_replacement_images():
     """加载替换图像特征"""
@@ -185,6 +251,31 @@ def image_to_base64(image):
 def index():
     """主页"""
     return render_template('index.html')
+
+@app.route('/health')
+def health_check():
+    """健康检查端点"""
+    try:
+        # 检查模型是否已加载
+        models_loaded = (sam_model is not None and 
+                        mask_generator is not None and 
+                        dinov2_model is not None and 
+                        dinov2_transform is not None)
+        
+        status = {
+            'status': 'healthy' if models_loaded else 'initializing',
+            'models_loaded': models_loaded,
+            'replacement_images': len(replacement_embeddings) if replacement_embeddings else 0,
+            'device': str(device)
+        }
+        
+        return jsonify(status), 200 if models_loaded else 503
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
