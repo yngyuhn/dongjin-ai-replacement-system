@@ -20,8 +20,8 @@ COPY requirements-cloud.txt .
 
 # 先安装基础依赖
 RUN pip install --no-cache-dir flask==2.3.3 \
-    torch==2.0.1+cpu \
-    torchvision==0.15.2+cpu \
+    torch==2.6.0+cpu \
+    torchvision==0.21.0+cpu \
     opencv-python-headless==4.8.1.78 \
     numpy==1.24.3 \
     Pillow==10.0.1 \
