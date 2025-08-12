@@ -9,4 +9,7 @@ scipy
 tqdm
 requests
 gunicorn
+psutil
+boto3
+python-dotenv
 git+https://github.com/facebookresearch/segment-anything.git

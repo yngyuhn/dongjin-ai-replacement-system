@@ -15,20 +15,36 @@ import json
 import tempfile
 import shutil
 import gc
+import logging
 
-# 直接导入f3模块
+# 导入模块
 import f3
+from model_manager import ModelManager, load_sam_model_lazy, get_memory_status
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 初始化模型管理器
+model_manager = ModelManager()
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# 全局变量存储模型和数据
+# 全局变量存储模型和数据 - 改为按需加载
 sam_model = None
 mask_generator = None
 dinov2_model = None
 dinov2_transform = None
 replacement_embeddings = []
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 模型加载状态
+models_loaded = {
+    'sam': False,
+    'dinov2': False,
+    'replacement_images': False
+}
 
 # 存储当前处理的数据
 current_session = {
@@ -42,109 +58,27 @@ current_session = {
     'max_history': 10  # 最大历史记录数
 }
 
-def download_sam_model():
-    """下载SAM模型文件（带重试机制）"""
-    import urllib.request
-    import time
+def ensure_sam_model():
+    """确保SAM模型已加载（按需加载）"""
+    global sam_model, mask_generator, models_loaded
     
-    sam_checkpoint = "sam_vit_h_4b8939.pth"
-    sam_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
-    
-    # 检查模型文件是否已存在且完整
-    if os.path.exists(sam_checkpoint):
-        file_size = os.path.getsize(sam_checkpoint)
-        expected_size = 2564550879  # SAM模型的预期大小（约2.5GB）
-        if file_size >= expected_size * 0.95:  # 允许5%的误差
-            print("SAM模型文件已存在，跳过下载")
-            return sam_checkpoint
-        else:
-            print(f"模型文件不完整（{file_size} bytes），重新下载...")
-            os.remove(sam_checkpoint)
-    
-    print(f"正在下载SAM模型文件 ({sam_url})...")
-    print("模型文件较大(2.5GB)，首次下载需要一些时间，请耐心等待...")
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                print(f"第 {attempt + 1} 次尝试下载...")
-                time.sleep(5)  # 重试前等待5秒
-            
-            # 首先尝试urllib方法
-            urllib.request.urlretrieve(sam_url, sam_checkpoint)
-            print("SAM模型下载完成!")
-            
-            # 验证下载的文件大小
-            file_size = os.path.getsize(sam_checkpoint)
-            if file_size < 1000000:  # 如果文件小于1MB，可能下载失败
-                raise Exception(f"下载的文件大小异常: {file_size} bytes")
-            
-            return sam_checkpoint
-            
-        except Exception as e:
-            print(f"urllib下载失败: {e}")
-            
-            # 尝试使用requests备用方法
-            try:
-                import requests
-                print("尝试使用备用下载方法...")
-                
-                response = requests.get(sam_url, stream=True, timeout=60)
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(sam_checkpoint, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total_size > 0:
-                                percent = (downloaded / total_size) * 100
-                                print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
-                
-                print("\nSAM模型下载完成!")
-                
-                # 验证下载的文件大小
-                file_size = os.path.getsize(sam_checkpoint)
-                if file_size < 1000000:
-                    raise Exception(f"下载的文件大小异常: {file_size} bytes")
-                
-                return sam_checkpoint
-                
-            except Exception as e2:
-                print(f"备用下载方法也失败: {e2}")
-                if os.path.exists(sam_checkpoint):
-                    os.remove(sam_checkpoint)  # 删除不完整的文件
-                
-                if attempt == max_retries - 1:
-                    raise Exception(f"模型下载失败，已尝试 {max_retries} 次: {e2}")
-    
-    raise Exception("模型下载失败，请检查网络连接")
-
-def initialize_models():
-    """初始化所有模型（带错误处理）"""
-    global sam_model, mask_generator, dinov2_model, dinov2_transform, replacement_embeddings
-    
-    print("初始化模型中...")
+    if models_loaded['sam'] and sam_model is not None:
+        return sam_model, mask_generator
     
     try:
-        # 下载并加载SAM模型
-        print("步骤 1/4: 下载SAM模型...")
-        sam_checkpoint = download_sam_model()
-        model_type = "vit_h"
+        logger.info("按需加载SAM模型...")
         
-        print("步骤 2/4: 加载SAM模型...")
-        sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint).to(device)
+        # 清理内存
+        model_manager.cleanup_memory()
+        
+        # 加载SAM模型
+        sam_model = load_sam_model_lazy(device)
         
         # 创建掩码生成器
-        print("步骤 3/4: 创建掩码生成器...")
         mask_generator = SamAutomaticMaskGenerator(
             model=sam_model,
-            points_per_side=64,
-            points_per_batch=32,
+            points_per_side=32,  # 减少参数以节省内存
+            points_per_batch=16,  # 减少批次大小
             pred_iou_thresh=0.8,
             stability_score_thresh=0.8,
             min_mask_region_area=64,
@@ -152,43 +86,68 @@ def initialize_models():
             crop_n_points_downscale_factor=2,
         )
         
-        # 加载DINOv2模型
-        print("步骤 4/4: 加载DINOv2模型...")
-        dinov2_model, dinov2_transform = f3.load_dinov2_model(device, "dinov2_vitb14")
+        models_loaded['sam'] = True
+        logger.info("✅ SAM模型加载完成!")
         
-        # 预加载替换图像特征
-        print("加载替换图像特征...")
-        load_replacement_images()
-        
-        print("✅ 模型初始化完成!")
-        
-        # 清理内存
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        return sam_model, mask_generator
         
     except Exception as e:
-        print(f"❌ 模型初始化失败: {e}")
-        print("请检查:")
-        print("1. 网络连接是否正常")
-        print("2. 磁盘空间是否足够（需要至少3GB）")
-        print("3. 系统内存是否足够（建议至少4GB）")
+        logger.error(f"❌ SAM模型加载失败: {e}")
+        raise Exception(f"SAM模型加载失败: {e}")
+
+def ensure_dinov2_model():
+    """确保DINOv2模型已加载（按需加载）"""
+    global dinov2_model, dinov2_transform, models_loaded
+    
+    if models_loaded['dinov2'] and dinov2_model is not None:
+        return dinov2_model, dinov2_transform
+    
+    try:
+        logger.info("按需加载DINOv2模型...")
         
         # 清理内存
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        raise Exception(f"模型初始化失败: {e}")
+        model_manager.cleanup_memory()
+        
+        # 加载DINOv2模型
+        dinov2_model, dinov2_transform = f3.load_dinov2_model(device, "dinov2_vitb14")
+        
+        models_loaded['dinov2'] = True
+        logger.info("✅ DINOv2模型加载完成!")
+        
+        return dinov2_model, dinov2_transform
+        
+    except Exception as e:
+        logger.error(f"❌ DINOv2模型加载失败: {e}")
+        raise Exception(f"DINOv2模型加载失败: {e}")
+
+def initialize_models():
+    """轻量级初始化 - 不预加载模型"""
+    logger.info("🚀 应用启动 - 使用按需加载模式")
+    logger.info("模型将在首次使用时自动下载和加载")
+    
+    # 检查内存状态
+    memory_status = get_memory_status()
+    logger.info(f"当前内存使用: {memory_status['rss_mb']:.1f}MB")
+    
+    # 预加载替换图像特征（较小，可以预加载）
+    try:
+        load_replacement_images()
+    except Exception as e:
+        logger.warning(f"替换图像加载失败: {e}")
+    
+    logger.info("✅ 应用初始化完成!")
 
 def load_replacement_images():
-    """加载替换图像特征"""
-    global replacement_embeddings
+    """加载替换图像特征（延迟加载）"""
+    global replacement_embeddings, models_loaded
+    
+    if models_loaded['replacement_images'] and replacement_embeddings:
+        return replacement_embeddings
     
     replacement_folder = "replacement_dataset1"
     if not os.path.exists(replacement_folder):
-        print(f"警告: 替换图像文件夹不存在: {replacement_folder}")
-        return
+        logger.warning(f"替换图像文件夹不存在: {replacement_folder}")
+        return []
     
     replacement_paths = []
     for root, _, files in os.walk(replacement_folder):
@@ -197,13 +156,19 @@ def load_replacement_images():
             if f3.is_valid_image(full_path):
                 replacement_paths.append(full_path)
     
-    print(f"找到 {len(replacement_paths)} 张替换图像")
+    logger.info(f"找到 {len(replacement_paths)} 张替换图像")
     
     if replacement_paths:
+        # 确保DINOv2模型已加载
+        dinov2_model, dinov2_transform = ensure_dinov2_model()
+        
         replacement_embeddings = f3.get_replacement_image_embeddings(
             replacement_paths, dinov2_transform, dinov2_model, device)
+        
+        models_loaded['replacement_images'] = True
     
-    print(f"成功加载 {len(replacement_embeddings)} 张替换图像特征")
+    logger.info(f"成功加载 {len(replacement_embeddings)} 张替换图像特征")
+    return replacement_embeddings
 
 def save_history_state(operation_name):
     """保存当前状态到历史记录"""
@@ -336,7 +301,7 @@ def upload_image():
         })
         
     except Exception as e:
-        print(f"上传处理错误: {e}")
+        logger.error(f"上传处理错误: {e}")
         return jsonify({'error': f'处理失败: {str(e)}'}), 500
 
 @app.route('/process', methods=['POST'])
@@ -354,12 +319,17 @@ def process_image():
         if current_session['image'] is None:
             return jsonify({'error': '请先上传图像'}), 400
         
+        # 自动内存管理
+        model_manager.auto_manage_memory()
+        
+        # 确保SAM模型已加载
+        sam_model, mask_generator = ensure_sam_model()
+        
         # 重新创建掩码生成器（使用用户参数）
-        global mask_generator
         mask_generator = SamAutomaticMaskGenerator(
             model=sam_model,
-            points_per_side=64,
-            points_per_batch=32,
+            points_per_side=32,  # 减少内存使用
+            points_per_batch=16,  # 减少内存使用
             pred_iou_thresh=confidence_threshold,
             stability_score_thresh=stability_threshold,
             min_mask_region_area=64,
@@ -368,7 +338,7 @@ def process_image():
         )
         
         # 生成掩码（使用用户设置的参数）
-        print(f"使用用户参数生成掩码: 置信值={confidence_threshold}, 稳定值={stability_threshold}")
+        logger.info(f"使用用户参数生成掩码: 置信值={confidence_threshold}, 稳定值={stability_threshold}")
         image_rgb = cv2.cvtColor(current_session['image'], cv2.COLOR_BGR2RGB)
         masks = mask_generator.generate(image_rgb)
         
@@ -376,6 +346,9 @@ def process_image():
             return jsonify({'error': '未能生成掩码，请尝试调整参数'}), 400
         
         current_session['masks'] = masks
+        
+        # 确保DINOv2模型已加载
+        dinov2_model, dinov2_transform = ensure_dinov2_model()
         
         # 重新计算特征和树结构
         image_gray = current_session['original_gray']
@@ -390,6 +363,9 @@ def process_image():
         
         # 保存处理前状态
         save_history_state("处理前状态")
+        
+        # 确保替换图像已加载
+        replacement_embeddings = load_replacement_images()
         
         # 执行替换
         for root in root_nodes:
@@ -414,7 +390,7 @@ def process_image():
         })
         
     except Exception as e:
-        print(f"处理错误: {e}")
+        logger.error(f"处理错误: {e}")
         return jsonify({'error': f'处理失败: {str(e)}'}), 500
 
 @app.route('/get_masks', methods=['GET'])
@@ -479,7 +455,7 @@ def get_masks():
         })
         
     except Exception as e:
-        print(f"获取掩码错误: {e}")
+        logger.error(f"获取掩码错误: {e}")
         return jsonify({'error': f'获取掩码失败: {str(e)}'}), 500
 
 @app.route('/delete_mask', methods=['POST'])
@@ -521,7 +497,7 @@ def delete_mask():
         })
         
     except Exception as e:
-        print(f"删除掩码错误: {e}")
+        logger.error(f"删除掩码错误: {e}")
         return jsonify({'error': f'删除掩码失败: {str(e)}'}), 500
 
 @app.route('/replace_manual', methods=['POST'])
@@ -537,6 +513,9 @@ def replace_manual():
         
         if mask_id >= len(current_session['masks']):
             return jsonify({'error': '掩码ID无效'}), 400
+        
+        # 确保替换图像已加载
+        replacement_embeddings = load_replacement_images()
         
         # 找到指定的替换图像
         replacement_path = None
@@ -573,7 +552,7 @@ def replace_manual():
             return jsonify({'error': '替换失败'}), 500
         
     except Exception as e:
-        print(f"手动替换错误: {e}")
+        logger.error(f"手动替换错误: {e}")
         return jsonify({'error': f'手动替换失败: {str(e)}'}), 500
 
 def manual_replace_mask(canvas_gray, image_gray, mask, replacement_path, mask_index):
@@ -616,13 +595,16 @@ def manual_replace_mask(canvas_gray, image_gray, mask, replacement_path, mask_in
         return True
         
     except Exception as e:
-        print(f"手动替换掩码失败: {e}")
+        logger.error(f"手动替换掩码失败: {e}")
         return False
 
 @app.route('/get_replacements', methods=['GET'])
 def get_replacements():
     """获取所有可用的替换图像"""
     try:
+        # 确保替换图像已加载
+        replacement_embeddings = load_replacement_images()
+        
         replacements = []
         for path, _ in replacement_embeddings:
             name = os.path.basename(path)
@@ -649,7 +631,7 @@ def get_replacements():
         })
         
     except Exception as e:
-        print(f"获取替换图像错误: {e}")
+        logger.error(f"获取替换图像错误: {e}")
         return jsonify({'error': f'获取替换图像失败: {str(e)}'}), 500
 
 @app.route('/download', methods=['GET'])
@@ -667,7 +649,7 @@ def download_result():
         return send_file(temp_file.name, as_attachment=True, download_name='dongji_result.png')
         
     except Exception as e:
-        print(f"下载错误: {e}")
+        logger.error(f"下载错误: {e}")
         return jsonify({'error': f'下载失败: {str(e)}'}), 500
 
 @app.route('/undo', methods=['POST'])
@@ -720,9 +702,9 @@ def get_history():
         return jsonify({'error': f'获取历史失败: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    print("正在初始化侗锦AI替换系统...")
+    logger.info("正在初始化侗锦AI替换系统...")
     initialize_models()
-    print("系统启动完成!")
+    logger.info("系统启动完成!")
     
     # 获取端口号（云平台会设置PORT环境变量）
     port = int(os.environ.get('PORT', 5000))
