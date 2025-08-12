@@ -81,9 +81,12 @@ python check_deployment.py https://your-app.onrender.com
 
 ### 常见部署问题
 1. **Git依赖错误**：已修复，系统会自动安装Git
-2. **Gunicorn未找到**：已修复，已添加到依赖中
+2. **Gunicorn未找到**：已修复，render.yaml现在使用requirements-cloud.txt安装依赖
+   - 错误信息：`bash: line 1: gunicorn: command not found`
+   - 解决方案：确保buildCommand使用`pip install -r requirements-cloud.txt`
 3. **模型下载失败**：系统会自动重试3次
 4. **内存不足**：已优化内存使用和清理
+5. **端口绑定问题**：应用已配置绑定到0.0.0.0:$PORT
 
 ### 部署状态检查
 - ✅ **构建成功**：依赖安装完成
