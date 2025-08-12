@@ -28,7 +28,8 @@ RUN pip install --no-cache-dir flask==2.3.3 \
     scikit-learn==1.3.0 \
     scipy==1.11.4 \
     tqdm==4.66.1 \
-    requests==2.31.0
+    requests==2.31.0 \
+    gunicorn==21.2.0
 
 # 单独安装segment-anything
 RUN pip install --no-cache-dir git+https://github.com/facebookresearch/segment-anything.git
@@ -43,4 +44,4 @@ RUN mkdir -p /app && chmod 755 /app
 EXPOSE 5000
 
 # 启动应用（模型将在首次运行时自动下载）
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
