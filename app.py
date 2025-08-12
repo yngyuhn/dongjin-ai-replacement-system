@@ -41,19 +41,58 @@ current_session = {
     'max_history': 10  # 最大历史记录数
 }
 
+def download_sam_model():
+    """下载SAM模型文件"""
+    import urllib.request
+    
+    sam_checkpoint = "sam_vit_h_4b8939.pth"
+    sam_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+    
+    if not os.path.exists(sam_checkpoint):
+        print(f"正在下载SAM模型文件 ({sam_url})...")
+        print("模型文件较大(2.5GB)，首次下载需要一些时间，请耐心等待...")
+        
+        try:
+            urllib.request.urlretrieve(sam_url, sam_checkpoint)
+            print("SAM模型下载完成!")
+        except Exception as e:
+            print(f"模型下载失败: {e}")
+            # 尝试使用备用下载方法
+            try:
+                import requests
+                print("尝试使用备用下载方法...")
+                response = requests.get(sam_url, stream=True)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(sam_checkpoint, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
+                
+                print("\nSAM模型下载完成!")
+            except Exception as e2:
+                raise Exception(f"模型下载失败: {e2}")
+    
+    return sam_checkpoint
+
 def initialize_models():
     """初始化所有模型"""
     global sam_model, mask_generator, dinov2_model, dinov2_transform, replacement_embeddings
     
     print("初始化模型中...")
     
-    # 加载SAM模型
-    sam_checkpoint = "sam_vit_h_4b8939.pth"
+    # 下载并加载SAM模型
+    sam_checkpoint = download_sam_model()
     model_type = "vit_h"
     
-    if not os.path.exists(sam_checkpoint):
-        raise FileNotFoundError(f"SAM模型文件未找到: {sam_checkpoint}")
-    
+    print("正在加载SAM模型...")
     sam_model = sam_model_registry[model_type](checkpoint=sam_checkpoint).to(device)
     
     # 创建掩码生成器
@@ -594,14 +633,10 @@ if __name__ == '__main__':
     initialize_models()
     print("系统启动完成!")
     
-    # 获取端口号，默认为5000
-    import os
+    # 获取端口号（云平台会设置PORT环境变量）
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_ENV') != 'production'
     
-    app.run(debug=debug, host='0.0.0.0', port=port)
-
-# 为生产环境初始化模型
-print("正在初始化侗锦AI替换系统...")
-initialize_models()
-print("系统启动完成!")
+    # 生产环境关闭debug模式
+    debug_mode = os.environ.get('FLASK_ENV') != 'production'
+    
+    app.run(debug=debug_mode, host='0.0.0.0', port=port)
